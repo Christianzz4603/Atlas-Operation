@@ -1,0 +1,19 @@
+[package]
+name = "atlas-miniwars"
+version = "0.2.0"
+edition = "2021"
+description = "Native Rust port of Atlas MiniWars (no HTML / no webview)"
+
+[dependencies]
+macroquad = "0.4"
+miniz_oxide = "0.8"
+
+[profile.dev]
+opt-level = 2          # the shading pass is slow at opt-level 0
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
