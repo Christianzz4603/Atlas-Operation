@@ -64,7 +64,7 @@ jobs:
           mkdir -p dist
           # target/ is root-owned (built inside docker), so don't `find` it - copy the known path
           sudo chown -R "$USER" target || true
-          APK=$(sudo find target -name "*.apk" | head -n1); echo "apk: $APK"; cp "$APK" dist/atlas-miniwars.apk
+          sudo find target -name "*.apk" -exec ls -la {} \; ; cp target/android-artifacts/debug/apk/miniwars.apk dist/atlas-miniwars.apk
           ls -la dist
       - name: Upload
         uses: actions/upload-artifact@v4
