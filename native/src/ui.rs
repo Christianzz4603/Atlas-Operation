@@ -67,19 +67,27 @@ fn button(font: &Option<Font>, r: Rect, text: &str, enabled: bool, tap: Option<V
     enabled && tap.map_or(false, |t| r.contains(t))
 }
 
-#[derive(Default)]
 pub struct Ui {
     pub selected: Option<u16>,
     pub observer: bool,
+    /// user UI scale multiplier (UI+ / UI- buttons, saved in atlas.cfg)
+    pub scale_mult: f32,
+    pub scale_changed: bool,
     /// set by the on-screen NEW / MAP buttons; main() acts on them
     pub want_restart: bool,
     pub want_next_map: bool,
 }
 
+impl Default for Ui {
+    fn default() -> Self {
+        Ui { selected: None, observer: false, scale_mult: 1.0, scale_changed: false, want_restart: false, want_next_map: false }
+    }
+}
+
 impl Ui {
     pub fn frame(&mut self, font: &Option<Font>, sim: &mut Sim, world: &World, cam: &mut MapCamera, tap: Option<Vec2>) {
         let (sw, sh) = (screen_width(), screen_height());
-        let s = (sh / 720.0).clamp(0.9, 1.8);
+        let s = (sh / 720.0).clamp(0.9, 1.8) * self.scale_mult;
         let fs = (20.0 * s) as u16;
         let fs_small = (16.0 * s) as u16;
         let bar_h = 46.0 * s;
@@ -159,7 +167,20 @@ impl Ui {
             self.want_restart = true;
             consumed = true;
         }
-        if tap.map_or(false, |t| t.x > zx - 4.0 * s && t.y > sh - 12.0 * s - 4.0 * (zb + 6.0 * s) - 4.0 * s) {
+        let zx2 = zx - zw - 6.0 * s;
+        let mut zy2 = sh - 12.0 * s - 4.0 * (zb + 6.0 * s);
+        if button(font, Rect::new(zx2, zy2, zw, zb), "UI+", true, tap, fs_small) {
+            self.scale_mult = (self.scale_mult * 1.15).min(2.5);
+            self.scale_changed = true;
+            consumed = true;
+        }
+        zy2 += zb + 6.0 * s;
+        if button(font, Rect::new(zx2, zy2, zw, zb), "UI-", true, tap, fs_small) {
+            self.scale_mult = (self.scale_mult / 1.15).max(0.6);
+            self.scale_changed = true;
+            consumed = true;
+        }
+        if tap.map_or(false, |t| t.x > zx2 - 4.0 * s && t.y > sh - 12.0 * s - 4.0 * (zb + 6.0 * s) - 4.0 * s) {
             consumed = true;
         }
 
