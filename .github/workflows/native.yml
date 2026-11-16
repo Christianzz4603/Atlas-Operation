@@ -96,6 +96,19 @@ jobs:
           cat atlas-log.txt
           grep -q "autotest done" atlas-log.txt
           ! grep -q "PANIC" atlas-log.txt
+      - name: UI walkthrough (presses every button)
+        run: |
+          cd dist
+          rm -f atlas-log.txt
+          set +e
+          ATLAS_UITEST=60 LIBGL_ALWAYS_SOFTWARE=1 timeout 150 xvfb-run -a -s "-screen 0 1280x720x24" ./atlas-miniwars
+          echo "exit code: $?"
+          set -e
+          echo "----- atlas-log.txt -----"
+          cat atlas-log.txt
+          grep -q "uitest done" atlas-log.txt
+          ! grep -q "MISSING" atlas-log.txt
+          ! grep -q "PANIC" atlas-log.txt
 
   smoke-android:
     name: smoke test (Android emulator)

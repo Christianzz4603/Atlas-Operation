@@ -1,6 +1,5 @@
-//! Pan / zoom camera. Port of the JS `Camera` (same smoothing constants),
-//! driven by mouse + wheel + WASD/arrows on desktop and 1-finger pan / 2-finger pinch on touch.
-//! Also detects taps (press+release with almost no movement) for the UI.
+//! Pan / zoom camera (port of the JS Camera smoothing constants). Input comes from `Pointer`.
+use crate::input::Pointer;
 use macroquad::prelude::*;
 
 const ZOOM_TAU: f32 = 0.075;
@@ -21,15 +20,8 @@ pub struct MapCamera {
     vel: Vec2,
     anchor: Option<(Vec2, Vec2)>, // (screen point, world point) kept fixed while zooming
     dragging: bool,
-    last_ptr: Vec2,
-    pinch_dist: f32,
+    pan_active: bool,
     ready: bool,
-    was_down: bool,
-    press_pos: Vec2,
-    press_t: f32,
-    max_move: f32,
-    pinched: bool,
-    tap: Option<Vec2>,
 }
 
 fn clamp_axis(o: f32, view: f32, content: f32) -> f32 {
@@ -54,15 +46,8 @@ impl MapCamera {
             vel: Vec2::ZERO,
             anchor: None,
             dragging: false,
-            last_ptr: Vec2::ZERO,
-            pinch_dist: 0.0,
+            pan_active: false,
             ready: false,
-            was_down: false,
-            press_pos: Vec2::ZERO,
-            press_t: 0.0,
-            max_move: 0.0,
-            pinched: false,
-            tap: None,
         }
     }
 
@@ -89,11 +74,6 @@ impl MapCamera {
         self.target_offset.y = clamp_axis(self.target_offset.y, self.view.y, t.y);
     }
 
-    /// A press+release with (almost) no movement. Consumed by the caller.
-    pub fn take_tap(&mut self) -> Option<Vec2> {
-        self.tap.take()
-    }
-
     pub fn zoom_at(&mut self, p: Vec2, next: f32) {
         let t = next.clamp(self.min_scale, self.max_scale);
         if (t - self.target_scale).abs() < f32::EPSILON {
@@ -104,7 +84,7 @@ impl MapCamera {
         self.vel = Vec2::ZERO;
     }
 
-    /// Zoom around the middle of the screen (used by the on-screen +/- buttons).
+    /// Zoom around the middle of the screen (the on-screen +/- buttons).
     pub fn zoom_center(&mut self, factor: f32) {
         self.zoom_at(self.view * 0.5, self.target_scale * factor);
     }
@@ -114,61 +94,28 @@ impl MapCamera {
         (w.x.floor() as i32, w.y.floor() as i32)
     }
 
-    pub fn update(&mut self, dt: f32) {
+    /// `over_ui`: the pointer is currently over a HUD element (don't pan / zoom through it).
+    pub fn update(&mut self, dt: f32, ptr: &Pointer, over_ui: bool) {
         let dt = dt.max(1e-4);
-        let touches = touches();
-
-        if touches.len() >= 2 {
-            // pinch zoom
-            let (a, b) = (touches[0].position, touches[1].position);
-            let d = a.distance(b);
-            if self.pinch_dist > 1.0 && d > 1.0 {
-                self.zoom_at((a + b) * 0.5, self.target_scale * d / self.pinch_dist);
-            }
-            self.pinch_dist = d;
-            self.dragging = false;
-            self.pinched = true;
-            self.was_down = false;
-        } else {
-            self.pinch_dist = 0.0;
-            let (down, pos) = if let Some(t) = touches.first() {
-                let up = matches!(t.phase, TouchPhase::Ended | TouchPhase::Cancelled);
-                (!up, t.position)
-            } else {
-                (is_mouse_button_down(MouseButton::Left), Vec2::from(mouse_position()))
-            };
-            if down {
-                if !self.was_down {
-                    self.press_pos = pos;
-                    self.press_t = 0.0;
-                    self.max_move = 0.0;
-                    self.pinched = false;
-                }
-                self.press_t += dt;
-                self.max_move = self.max_move.max((pos - self.press_pos).length());
-                if self.dragging {
-                    let delta = pos - self.last_ptr;
-                    self.target_offset += delta;
-                    self.vel = self.vel * 0.5 + (delta / dt) * 0.5;
-                }
-                self.dragging = true;
-                self.last_ptr = pos;
-            } else {
-                if self.was_down && !self.pinched && self.max_move < 8.0 && self.press_t < 0.45 {
-                    self.tap = Some(self.last_ptr);
-                }
-                self.dragging = false;
-            }
-            self.was_down = down;
-
-            let (_, wheel) = mouse_wheel();
-            if wheel != 0.0 {
-                let f = 1.18f32.powf(wheel.signum());
-                self.zoom_at(Vec2::from(mouse_position()), self.target_scale * f);
-            }
+        if ptr.pressed {
+            self.pan_active = !over_ui;
+            self.vel = Vec2::ZERO;
+        }
+        self.dragging = false;
+        if ptr.down && self.pan_active && ptr.moved {
+            self.target_offset += ptr.delta;
+            self.vel = self.vel * 0.5 + (ptr.delta / dt) * 0.5;
+            self.dragging = true;
+        }
+        if let Some((c, ratio)) = ptr.pinch {
+            self.zoom_at(c, self.target_scale * ratio);
+        }
+        if ptr.wheel != 0.0 && !over_ui {
+            let f = 1.18f32.powf(ptr.wheel.signum());
+            self.zoom_at(ptr.pos, self.target_scale * f);
         }
 
-        // keyboard pan
+        // keyboard pan / zoom
         let mut k = Vec2::ZERO;
         if is_key_down(KeyCode::A) || is_key_down(KeyCode::Left) { k.x += 1.0; }
         if is_key_down(KeyCode::D) || is_key_down(KeyCode::Right) { k.x -= 1.0; }
@@ -182,7 +129,7 @@ impl MapCamera {
         if is_key_down(KeyCode::E) { self.zoom_at(self.view * 0.5, self.target_scale / (1.0 + 1.6 * dt)); }
 
         // inertia
-        if !self.dragging && (self.vel.x.abs() > 1.0 || self.vel.y.abs() > 1.0) {
+        if !self.dragging && !ptr.down && (self.vel.x.abs() > 1.0 || self.vel.y.abs() > 1.0) {
             self.target_offset += self.vel * dt;
             self.vel *= (-FRICTION * dt).exp();
         }

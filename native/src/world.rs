@@ -271,6 +271,13 @@ impl World {
         &self.map.countries[id as usize].name
     }
 
+    /// Draw the whole map (ocean + land) into a screen rectangle (menu backdrop, thumbnails).
+    pub fn draw_rect(&self, x: f32, y: f32, w: f32, h: f32, tint: Color) {
+        let params = DrawTextureParams { dest_size: Some(vec2(w, h)), ..Default::default() };
+        draw_texture_ex(&self.ocean_tex, x, y, tint, params.clone());
+        draw_texture_ex(&self.land_tex, x, y, tint, params);
+    }
+
     pub fn draw(&self, cam: &MapCamera) {
         let size = vec2(self.w() * cam.scale, self.h() * cam.scale);
         let pos = cam.offset.round();

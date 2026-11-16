@@ -449,6 +449,15 @@ impl Sim {
         self.commit(att, def, amount)
     }
 
+    /// Pull the troops back from the front against `def` (the war itself stays on).
+    pub fn stop_attack(&mut self, att: u16, def: u16) {
+        for k in 0..self.fronts.len() {
+            if self.fronts[k].attacker == att && self.fronts[k].defender == def && !self.fronts[k].done {
+                self.return_front(k);
+            }
+        }
+    }
+
     pub fn decline_offer(&mut self, from: u16) {
         self.peace_offers.retain(|&x| x != from);
         self.offer_cd[from as usize] = self.time + 15.0;

@@ -12,6 +12,8 @@ pub struct Country {
     pub military: f32,
     /// base mobilizable manpower (pop * 12000 * militarization modifier)
     pub mobilizable: f32,
+    /// ISO 3166 alpha-2 code used for the flag image (may be empty)
+    pub iso: String,
 }
 
 pub struct Capital {
@@ -70,7 +72,7 @@ impl MapData {
             return Err("bad magic".to_string());
         }
         let version = r.u16()?;
-        if version != 2 {
+        if version != 3 {
             return Err(format!("map format v{} not supported (re-run tools/bake.py)", version));
         }
         let w = r.u16()? as usize;
@@ -80,14 +82,16 @@ impl MapData {
         let crop = [r.f32()?, r.f32()?, r.f32()?, r.f32()?];
 
         let mut countries = Vec::with_capacity(n_countries + 1);
-        countries.push(Country { name: String::new(), rgb: [58, 111, 143], pop: 0.0, gdp: 0.0, military: 0.0, mobilizable: 1.0 });
+        countries.push(Country { name: String::new(), rgb: [58, 111, 143], pop: 0.0, gdp: 0.0, military: 0.0, mobilizable: 1.0, iso: String::new() });
         for _ in 0..n_countries {
             let len = r.u8()? as usize;
             let name = String::from_utf8_lossy(r.take(len)?).into_owned();
             let c = r.take(3)?;
             let rgb = [c[0], c[1], c[2]];
             let (pop, gdp, military, mobilizable) = (r.f32()?, r.f32()?, r.f32()?, r.f32()?);
-            countries.push(Country { name, rgb, pop, gdp, military, mobilizable });
+            let il = r.u8()? as usize;
+            let iso = String::from_utf8_lossy(r.take(il)?).into_owned();
+            countries.push(Country { name, rgb, pop, gdp, military, mobilizable, iso });
         }
         let mut capitals = Vec::with_capacity(n_caps);
         for _ in 0..n_caps {
