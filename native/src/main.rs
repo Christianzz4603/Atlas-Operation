@@ -94,7 +94,7 @@ fn window_conf() -> Conf {
         window_width: c.width,
         window_height: c.height,
         fullscreen: c.fullscreen,
-        high_dpi: c.high_dpi,
+        high_dpi: c.high_dpi || cfg!(target_os = "android"),
         sample_count: c.sample_count,
         ..Default::default()
     }

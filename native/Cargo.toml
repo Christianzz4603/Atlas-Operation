@@ -9,7 +9,11 @@ macroquad = "0.4"
 miniz_oxide = "0.8"
 
 [profile.dev]
-opt-level = 2          # the shading pass is slow at opt-level 0
+# dev builds are also what the Android CI packages, so keep them fast
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
 
 [profile.release]
 opt-level = 3
@@ -17,3 +21,14 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Android (cargo-quad-apk)
+[package.metadata.android]
+package_name = "com.atlas.miniwars"
+label = "Atlas MiniWars"
+version_name = "0.2.0"
+version_code = 2
+build_targets = ["aarch64-linux-android"]
+min_sdk_version = 21
+target_sdk_version = 29
+fullscreen = true

@@ -47,3 +47,27 @@ jobs:
           name: atlas-miniwars-${{ matrix.name }}
           path: native/dist
           if-no-files-found: error
+
+  android:
+    name: build (Android-apk)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build APK (cargo-quad-apk in docker)
+        run: |
+          docker run --rm -v "$PWD":/root/src -w /root/src notfl3/cargo-apk sh -c "rustup toolchain install stable --profile minimal && rustup default stable && rustup target add aarch64-linux-android && cargo quad-apk build"
+      - name: Collect APK
+        run: |
+          mkdir -p dist
+          find target -name '*.apk' -print
+          find target -name '*.apk' -exec cp {} dist/atlas-miniwars.apk \;
+          ls -la dist
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: atlas-miniwars-Android-apk
+          path: native/dist
+          if-no-files-found: error
