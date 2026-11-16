@@ -104,6 +104,11 @@ impl MapCamera {
         self.vel = Vec2::ZERO;
     }
 
+    /// Zoom around the middle of the screen (used by the on-screen +/- buttons).
+    pub fn zoom_center(&mut self, factor: f32) {
+        self.zoom_at(self.view * 0.5, self.target_scale * factor);
+    }
+
     pub fn screen_to_cell(&self, p: Vec2) -> (i32, i32) {
         let w = (p - self.offset) / self.scale;
         (w.x.floor() as i32, w.y.floor() as i32)

@@ -8,6 +8,7 @@
 //! naval invasions, alliances/assists, buildings/economy, missiles/nukes, ideology/policy,
 //! empires, victory points, population sim, news feed, enclave capture.
 use crate::world::World;
+use std::collections::HashMap;
 
 pub const SIM_STEP: f32 = 1.0 / 30.0;
 
@@ -67,6 +68,26 @@ const AI_RETALIATE_CAP: f32 = 0.55;
 const AI_COMMIT_COOLDOWN_S: f32 = 6.0;
 /// Wars with no front on either side for this long are quietly ended (simplification).
 const STALE_WAR_S: f32 = 60.0;
+// CONFIG.war (realism / mop-up)
+const RECAPTURE_HOLD_TICKS: u64 = 3;
+const MOPUP_MULT: f32 = 2.0;
+const ENCLAVE_MAX_CELLS: usize = 40;
+const ENCLAVE_MAX_FRAC: f32 = 0.1;
+const ENC_RECHECK_TICKS: u64 = 8;
+// CONFIG.combatBalance (dig-in / regroup)
+const RATIO_PIVOT: f32 = 1.0;
+const DIG_IN_SECONDS: f32 = 14.0;
+const DIG_IN_MAX_BONUS: f32 = 0.55;
+const STALL_CELLS_TRIGGER_FRAC: f32 = 0.035;
+const STALL_MIN_CELLS: f32 = 60.0;
+const REGROUP_ADVANCE_STRAIN: f32 = 0.35;
+const REGROUP_RESISTANCE_STRAIN: f32 = 1.3;
+const REGROUP_LOSS_STRAIN: f32 = 0.8;
+const REGROUP_BASE_WORK: f32 = 0.15;
+const REGROUP_RESISTANCE_WORK: f32 = 0.85;
+const REGROUP_RECOVERY_PER_SEC: f32 = 0.15;
+const REGROUP_RECOVERY_FLOOR: f32 = 0.4;
+const REGROUP_DOMINANCE_RECOVERY_BONUS: f32 = 0.4;
 
 struct Rng(u32);
 impl Rng {
@@ -98,6 +119,14 @@ pub struct Front {
     pub frontier: Vec<usize>,
     pub rebuild_at: u64,
     pub done: bool,
+    /// 0..1, grows while the front is not stalled; fortifies the defender
+    pub dig_in: f32,
+    pub regrouping: bool,
+    pub regroup_work: f32,
+    pub push_strain: f32,
+    pub push_combat_losses: f32,
+    enc_tick: u64,
+    enc_pocket: Option<Vec<usize>>,
 }
 
 pub struct Sim {
@@ -140,6 +169,9 @@ pub struct Sim {
     bbox: Vec<[i32; 4]>,
     pub dirty: Vec<[i32; 4]>,
     pub log: Vec<(String, f32)>,
+    recent: HashMap<usize, u64>,
+    enc_seen: Vec<u32>,
+    enc_epoch: u32,
 }
 
 fn clamp01(v: f32) -> f32 {
@@ -230,6 +262,9 @@ impl Sim {
             bbox,
             dirty: Vec::new(),
             log: Vec::new(),
+            recent: HashMap::new(),
+            enc_seen: vec![0; w * h],
+            enc_epoch: 0,
         };
         s.rebuild_adjacency(world);
         s
@@ -271,7 +306,8 @@ impl Sim {
         let att_cmd = 1.0 - COMMAND_ATTACK_WEAKNESS * if self.capital_fallen[a] { 1.0 } else { 0.0 };
         let def_cmd = 1.0 - COMMAND_DEFENSE_WEAKNESS * if self.capital_fallen[d] { 1.0 } else { 0.0 };
         let att = (f.committed * att_cmd).max(1.0);
-        let def = (f.def_alloc * def_cmd).max(1.0);
+        let dig = 1.0 + f.dig_in.clamp(0.0, 1.0) * DIG_IN_MAX_BONUS;
+        let def = (f.def_alloc * def_cmd * dig).max(1.0);
         (att / def).powf(RATIO_CURVE)
     }
 
@@ -485,6 +521,10 @@ impl Sim {
             }
         }
         self.fronts.retain(|f| !f.done);
+        if self.tick & 63 == 0 && self.recent.len() > 4000 {
+            let cut = self.tick.saturating_sub(RECAPTURE_HOLD_TICKS * 4);
+            self.recent.retain(|_, v| *v >= cut);
+        }
 
         self.ai_timer += sd;
         if self.ai_timer >= AI_PASS_S {
@@ -563,6 +603,211 @@ impl Sim {
         self.fronts[k] = f;
     }
 
+    /// (resistance, casualty_share, recovery) -- _regroupLoad (supply is not ported: full supply assumed)
+    fn regroup_load(&self, f: &Front) -> (f32, f32, f32) {
+        let ratio = self.power_ratio(f).max(0.001);
+        let resistance = 1.0 / (1.0 + ratio / RATIO_PIVOT.max(0.001));
+        let losses = f.push_combat_losses.max(0.0);
+        let casualty = losses / (f.committed.max(0.0) + losses).max(1.0);
+        let supply = 1.0f32;
+        let recovery = REGROUP_RECOVERY_PER_SEC
+            * (REGROUP_RECOVERY_FLOOR + (1.0 - REGROUP_RECOVERY_FLOOR) * supply)
+            * (1.0 + REGROUP_DOMINANCE_RECOVERY_BONUS * (1.0 - resistance));
+        (resistance, casualty, recovery)
+    }
+
+    /// _tickRealism: returns true while the front is stalled (regrouping).
+    fn tick_realism(&self, f: &mut Front, dt: f32) -> bool {
+        if f.collapse {
+            f.dig_in = 0.0;
+            f.regrouping = false;
+            f.regroup_work = 0.0;
+            f.push_strain = 0.0;
+            f.push_combat_losses = 0.0;
+            return false;
+        }
+        if f.regrouping {
+            let (_, _, recovery) = self.regroup_load(f);
+            f.regroup_work = (f.regroup_work - dt.max(0.0) * recovery).max(0.0);
+            if f.regroup_work <= 1e-8 {
+                f.regrouping = false;
+                f.push_strain = 0.0;
+                f.push_combat_losses = 0.0;
+            }
+        }
+        let stalled = f.regrouping;
+        if !stalled {
+            f.dig_in = (f.dig_in + dt / DIG_IN_SECONDS.max(0.001)).min(1.0);
+        }
+        stalled
+    }
+
+    /// _noteFrontAdvance: pushing hard builds strain; enough strain forces a regroup pause.
+    fn note_front_advance(&self, f: &mut Front, gained: usize, orig_cells: f32) {
+        if f.collapse || gained == 0 {
+            return;
+        }
+        let (resistance, casualty, _) = self.regroup_load(f);
+        let baseline = STALL_MIN_CELLS.max(orig_cells * STALL_CELLS_TRIGGER_FRAC);
+        f.push_strain += gained as f32 / baseline.max(1.0)
+            * (REGROUP_ADVANCE_STRAIN + REGROUP_RESISTANCE_STRAIN * resistance + REGROUP_LOSS_STRAIN * casualty);
+        if f.push_strain >= 1.0 && !f.regrouping {
+            f.regrouping = true;
+            f.regroup_work = (REGROUP_BASE_WORK + REGROUP_RESISTANCE_WORK * resistance) * (1.0 + REGROUP_LOSS_STRAIN * casualty);
+            f.cell_budget = 0.0;
+        }
+    }
+
+    /// _findSmallestEnclave: smallest connected blob of the defender (<= max_size cells)
+    /// that is surrounded only by the attacker (or water).
+    fn find_enclave(&mut self, att: u16, def: u16, max_size: usize, world: &World) -> Option<Vec<usize>> {
+        let (w, h) = (self.w as i32, self.h as i32);
+        let wu = self.w;
+        let b = self.bbox[def as usize];
+        let owner = &world.map.owner;
+        let land = &world.map.land;
+        let limit = max_size.max(ENCLAVE_MAX_CELLS);
+        self.enc_epoch = self.enc_epoch.wrapping_add(1);
+        if self.enc_epoch == 0 {
+            for v in self.enc_seen.iter_mut() {
+                *v = 0;
+            }
+            self.enc_epoch = 1;
+        }
+        let epoch = self.enc_epoch;
+        let mut best: Option<Vec<usize>> = None;
+        let mut stack: Vec<usize> = Vec::new();
+        for y in b[1].max(0)..=b[3].min(h - 1) {
+            for x in b[0].max(0)..=b[2].min(w - 1) {
+                let start = (y * w + x) as usize;
+                if owner[start] != def || self.enc_seen[start] == epoch {
+                    continue;
+                }
+                stack.clear();
+                stack.push(start);
+                self.enc_seen[start] = epoch;
+                let mut head = 0usize;
+                let mut count = 0usize;
+                let mut cells: Vec<usize> = Vec::new();
+                let mut enclosed = true;
+                while head < stack.len() {
+                    let i = stack[head];
+                    head += 1;
+                    count += 1;
+                    if count <= limit {
+                        cells.push(i);
+                    }
+                    let (cx, cy) = ((i % wu) as i32, (i / wu) as i32);
+                    let mut nb = [usize::MAX; 4];
+                    if cx > 0 { nb[0] = i - 1; }
+                    if cx + 1 < w { nb[1] = i + 1; }
+                    if cy > 0 { nb[2] = i - wu; }
+                    if cy + 1 < h { nb[3] = i + wu; }
+                    for &n in &nb {
+                        if n == usize::MAX {
+                            continue;
+                        }
+                        if owner[n] == def {
+                            if self.enc_seen[n] != epoch {
+                                self.enc_seen[n] = epoch;
+                                stack.push(n);
+                            }
+                        } else if land[n] == 1 && owner[n] != att {
+                            enclosed = false;
+                        }
+                    }
+                }
+                if count <= limit && count <= max_size && enclosed {
+                    let better = match &best {
+                        Some(bc) => cells.len() < bc.len(),
+                        None => true,
+                    };
+                    if better {
+                        best = Some(cells);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Hand `captured` cells (all owned by the defender) to the attacker and bookkeep.
+    fn apply_capture(&mut self, f: &mut Front, captured: &[usize], world: &mut World) {
+        let (a, d) = (f.attacker as usize, f.defender as usize);
+        let (w, h) = (self.w as i32, self.h as i32);
+        let defender = f.defender;
+        let mut bx = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        let mut new_front: Vec<usize> = Vec::new();
+        let tick = self.tick;
+        for &i in captured {
+            world.set_owner(i, f.attacker);
+            self.recent.insert(i, tick);
+            let (x, y) = ((i % self.w) as i32, (i / self.w) as i32);
+            bx = [bx[0].min(x), bx[1].min(y), bx[2].max(x), bx[3].max(y)];
+            if x + 1 < w { new_front.push(i + 1); }
+            if x > 0 { new_front.push(i - 1); }
+            if y + 1 < h { new_front.push(i + self.w); }
+            if y > 0 { new_front.push(i - self.w); }
+        }
+        let n_cap = captured.len() as u32;
+        self.cells[d] = self.cells[d].saturating_sub(n_cap);
+        self.cells[a] += n_cap;
+        {
+            let ab = &mut self.bbox[a];
+            ab[0] = ab[0].min(bx[0]);
+            ab[1] = ab[1].min(bx[1]);
+            ab[2] = ab[2].max(bx[2]);
+            ab[3] = ab[3].max(bx[3]);
+        }
+        new_front.retain(|&i| world.map.owner[i] == defender);
+        f.frontier.retain(|&i| world.map.owner[i] == defender);
+        f.frontier.extend(new_front);
+        f.frontier.sort_unstable();
+        f.frontier.dedup();
+        self.dirty.push(bx);
+        if self.cells[d] == 0 {
+            self.eliminate(f.defender);
+            f.done = true;
+        }
+    }
+
+    fn capture_pocket(&mut self, f: &mut Front, cells: &[usize], cost: f32, world: &mut World) {
+        if cells.is_empty() {
+            f.done = true;
+            return;
+        }
+        f.committed = (f.committed - cells.len() as f32 * cost).max(0.0);
+        self.apply_capture(f, cells, world);
+    }
+
+    /// Mop-up: grab a small pocket the attacker has fully surrounded. Returns true if it captured.
+    fn try_pocket(&mut self, f: &mut Front, cap: usize, cost: f32, take: usize, world: &mut World) -> bool {
+        if f.enc_tick == 0 || self.tick - f.enc_tick >= ENC_RECHECK_TICKS {
+            f.enc_tick = self.tick;
+            f.enc_pocket = self.find_enclave(f.attacker, f.defender, cap, world);
+        }
+        let mut pocket = f.enc_pocket.take();
+        if let Some(p) = &pocket {
+            if p.iter().any(|&i| world.map.owner[i] != f.defender) {
+                pocket = None;
+            }
+        }
+        let Some(p) = pocket else { return false };
+        let tick = self.tick;
+        let held: Vec<usize> = p
+            .iter()
+            .copied()
+            .filter(|i| self.recent.get(i).map_or(true, |&rt| tick - rt >= RECAPTURE_HOLD_TICKS))
+            .take(take)
+            .collect();
+        if held.is_empty() {
+            f.enc_pocket = Some(p);
+            return false;
+        }
+        self.capture_pocket(f, &held, cost, world);
+        true
+    }
+
     fn advance_front(&mut self, f: &mut Front, dt: f32, world: &mut World) {
         let (a, d) = (f.attacker as usize, f.defender as usize);
         if self.eliminated[a] || self.eliminated[d] || !self.at_war[a * self.n + d] {
@@ -584,7 +829,21 @@ impl Sim {
         }
         if f.committed > 0.0 {
             let exposed_att = f.committed.min(f.def_alloc.max(0.0));
-            f.committed = (f.committed - exposed_att * (1.0 - (-att_rate * dt).exp())).max(0.0);
+            let lost = exposed_att * (1.0 - (-att_rate * dt).exp());
+            f.committed = (f.committed - lost).max(0.0);
+            f.push_combat_losses += lost;
+        }
+        // --- _tickRealism
+        let stalled = self.tick_realism(f, dt);
+        let def_orig = self.orig_cells[d].max(1) as f32;
+        let enclave_cap = ((def_orig * ENCLAVE_MAX_FRAC).floor() as usize).clamp(1, ENCLAVE_MAX_CELLS);
+        if stalled {
+            f.cell_budget = 0.0;
+            if self.cells[d] > 0 {
+                let cost = self.cost_per_cell(f);
+                self.try_pocket(f, enclave_cap, cost, usize::MAX, world);
+            }
+            return;
         }
         // --- _advance
         let ratio = self.power_ratio(f);
@@ -603,6 +862,12 @@ impl Sim {
         let take = f.cell_budget.floor().min(cap) as usize;
         f.cell_budget -= take as f32;
 
+        if take > 0 && f.committed < cost * MOPUP_MULT {
+            if self.try_pocket(f, enclave_cap, cost, take, world) {
+                return;
+            }
+        }
+
         let defender = f.defender;
         f.frontier.retain(|&i| world.map.owner[i] == defender);
         if f.frontier.is_empty() || self.tick >= f.rebuild_at {
@@ -616,48 +881,33 @@ impl Sim {
         if take == 0 {
             return;
         }
-        let captured: Vec<usize> = if f.frontier.len() <= MIN_REMNANT_CELLS || take >= f.frontier.len() {
-            f.frontier.clone()
+        // cells captured in the last few ticks can't be flipped straight back
+        let tick = self.tick;
+        let elig: Vec<usize> = f
+            .frontier
+            .iter()
+            .copied()
+            .filter(|i| self.recent.get(i).map_or(true, |&rt| tick - rt >= RECAPTURE_HOLD_TICKS))
+            .collect();
+        if elig.is_empty() {
+            return;
+        }
+        let captured: Vec<usize> = if elig.len() <= MIN_REMNANT_CELLS || take >= elig.len() {
+            elig
         } else {
             let seeds = if speed > 2.2 { 2 } else { 1 };
-            self.pick_cells(&f.frontier, take, seeds)
+            self.pick_cells(&elig, take, seeds)
         };
         if captured.is_empty() {
             return;
         }
-        let (w, h) = (self.w as i32, self.h as i32);
-        let mut bx = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
-        let mut new_front: Vec<usize> = Vec::new();
-        for &i in &captured {
-            world.set_owner(i, f.attacker);
-            let (x, y) = ((i % self.w) as i32, (i / self.w) as i32);
-            bx = [bx[0].min(x), bx[1].min(y), bx[2].max(x), bx[3].max(y)];
-            if x + 1 < w { new_front.push(i + 1); }
-            if x > 0 { new_front.push(i - 1); }
-            if y + 1 < h { new_front.push(i + self.w); }
-            if y > 0 { new_front.push(i - self.w); }
+        f.committed = (f.committed - captured.len() as f32 * cost).max(0.0);
+        if !f.collapse {
+            let gained = captured.len();
+            f.dig_in = (f.dig_in - gained as f32 / def_orig * 6.0).max(0.0);
+            self.note_front_advance(f, gained, def_orig);
         }
-        let n_cap = captured.len() as u32;
-        self.cells[d] = self.cells[d].saturating_sub(n_cap);
-        self.cells[a] += n_cap;
-        {
-            let ab = &mut self.bbox[a];
-            ab[0] = ab[0].min(bx[0]);
-            ab[1] = ab[1].min(bx[1]);
-            ab[2] = ab[2].max(bx[2]);
-            ab[3] = ab[3].max(bx[3]);
-        }
-        f.committed = (f.committed - n_cap as f32 * cost).max(0.0);
-        new_front.retain(|&i| world.map.owner[i] == defender);
-        f.frontier.retain(|&i| world.map.owner[i] == defender);
-        f.frontier.extend(new_front);
-        f.frontier.sort_unstable();
-        f.frontier.dedup();
-        self.dirty.push(bx);
-        if self.cells[d] == 0 {
-            self.eliminate(f.defender);
-            f.done = true;
-        }
+        self.apply_capture(f, &captured, world);
     }
 
     /// Bite a blob (or two) out of the frontier: the `take` cells closest to random seeds.

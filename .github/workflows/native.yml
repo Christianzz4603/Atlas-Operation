@@ -9,12 +9,16 @@ on:
 
 jobs:
   build:
-    name: build (${{ matrix.os }})
+    name: build (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          # Linux is built on 22.04 so the binary runs on older glibc (Debian 12 / Ubuntu 22.04 in proot)
+          - { name: Linux-x86_64, os: ubuntu-22.04 }
+          - { name: Linux-arm64, os: ubuntu-22.04-arm }
+          - { name: Windows-x64, os: windows-latest }
     defaults:
       run:
         working-directory: native
@@ -29,11 +33,17 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libx11-dev libxi-dev libgl1-mesa-dev libasound2-dev
       - name: Build (release)
         run: cargo build --release
-      - name: Upload binary
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/atlas-miniwars dist/ 2>/dev/null || cp target/release/atlas-miniwars.exe dist/
+          cp PLAY-ON-ANDROID.md atlas.cfg.example dist/
+          if [ "$RUNNER_OS" = "Linux" ]; then cp run-termux.sh dist/ && chmod +x dist/run-termux.sh dist/atlas-miniwars; fi
+          ls -la dist
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: atlas-miniwars-${{ runner.os }}
-          path: |
-            native/target/release/atlas-miniwars
-            native/target/release/atlas-miniwars.exe
+          name: atlas-miniwars-${{ matrix.name }}
+          path: native/dist
           if-no-files-found: error

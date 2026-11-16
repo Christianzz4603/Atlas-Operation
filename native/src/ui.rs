@@ -71,10 +71,13 @@ fn button(font: &Option<Font>, r: Rect, text: &str, enabled: bool, tap: Option<V
 pub struct Ui {
     pub selected: Option<u16>,
     pub observer: bool,
+    /// set by the on-screen NEW / MAP buttons; main() acts on them
+    pub want_restart: bool,
+    pub want_next_map: bool,
 }
 
 impl Ui {
-    pub fn frame(&mut self, font: &Option<Font>, sim: &mut Sim, world: &World, cam: &MapCamera, tap: Option<Vec2>) {
+    pub fn frame(&mut self, font: &Option<Font>, sim: &mut Sim, world: &World, cam: &mut MapCamera, tap: Option<Vec2>) {
         let (sw, sh) = (screen_width(), screen_height());
         let s = (sh / 720.0).clamp(0.9, 1.8);
         let fs = (20.0 * s) as u16;
@@ -129,6 +132,34 @@ impl Ui {
             sim.paused = !sim.paused;
         }
         if tap.map_or(false, |t| t.y < bar_h) {
+            consumed = true;
+        }
+
+        // on-screen camera / game buttons (touch + Winlator friendly: no wheel or keyboard needed)
+        let zb = 46.0 * s;
+        let zw = 64.0 * s;
+        let zx = sw - 12.0 * s - zw;
+        let mut zy = sh - 12.0 * s - 4.0 * (zb + 6.0 * s);
+        if button(font, Rect::new(zx, zy, zw, zb), "+", true, tap, fs) {
+            cam.zoom_center(1.6);
+            consumed = true;
+        }
+        zy += zb + 6.0 * s;
+        if button(font, Rect::new(zx, zy, zw, zb), "-", true, tap, fs) {
+            cam.zoom_center(1.0 / 1.6);
+            consumed = true;
+        }
+        zy += zb + 6.0 * s;
+        if button(font, Rect::new(zx, zy, zw, zb), "MAP", true, tap, fs_small) {
+            self.want_next_map = true;
+            consumed = true;
+        }
+        zy += zb + 6.0 * s;
+        if button(font, Rect::new(zx, zy, zw, zb), "NEW", true, tap, fs_small) {
+            self.want_restart = true;
+            consumed = true;
+        }
+        if tap.map_or(false, |t| t.x > zx - 4.0 * s && t.y > sh - 12.0 * s - 4.0 * (zb + 6.0 * s) - 4.0 * s) {
             consumed = true;
         }
 
@@ -283,7 +314,7 @@ impl Ui {
         // ---------- game over
         if let Some(p) = sim.player {
             if sim.eliminated[p as usize] {
-                let msg = "YOU WERE ELIMINATED - PRESS R TO RESTART";
+                let msg = "YOU WERE ELIMINATED - TAP NEW TO RESTART";
                 label(font, msg, (sw - text_w(font, msg, fs)) / 2.0, sh * 0.45, fs, RED);
             }
         }
