@@ -37,7 +37,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/atlas-miniwars dist/ 2>/dev/null || cp target/release/atlas-miniwars.exe dist/
+          cp target/release/miniwars dist/atlas-miniwars 2>/dev/null || cp target/release/miniwars.exe dist/atlas-miniwars.exe
           cp PLAY-ON-ANDROID.md atlas.cfg.example dist/
           if [ "$RUNNER_OS" = "Linux" ]; then cp run-termux.sh dist/ && chmod +x dist/run-termux.sh dist/atlas-miniwars; fi
           ls -la dist
@@ -64,7 +64,7 @@ jobs:
           mkdir -p dist
           # target/ is root-owned (built inside docker), so don't `find` it - copy the known path
           sudo chown -R "$USER" target || true
-          cp target/android-artifacts/debug/apk/atlas-miniwars.apk dist/atlas-miniwars.apk
+          APK=$(sudo find target -name "*.apk" | head -n1); echo "apk: $APK"; cp "$APK" dist/atlas-miniwars.apk
           ls -la dist
       - name: Upload
         uses: actions/upload-artifact@v4
