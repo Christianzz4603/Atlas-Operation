@@ -62,8 +62,9 @@ jobs:
       - name: Collect APK
         run: |
           mkdir -p dist
-          find target -name '*.apk' -print
-          find target -name '*.apk' -exec cp {} dist/atlas-miniwars.apk \;
+          # target/ is root-owned (built inside docker), so don't `find` it - copy the known path
+          sudo chown -R "$USER" target || true
+          cp target/android-artifacts/debug/apk/atlas-miniwars.apk dist/atlas-miniwars.apk
           ls -la dist
       - name: Upload
         uses: actions/upload-artifact@v4
