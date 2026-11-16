@@ -74,6 +74,9 @@ COLORS = {n: (int(r), int(g), int(b)) for n, r, g, b in
 CAPS = {n: (c, float(lo), float(la)) for n, c, lo, la in re.findall(
     r"'([^']+)':\{[^{}]*?capital:'([^']*)',\s*capLon:(-?[\d.]+),\s*capLat:(-?[\d.]+)", html)}
 
+ii = html.find('countryIso:{')
+ISO = dict(re.findall(r"'([^']+)':'([a-z]{2,3})'", html[ii:html.find('}', ii)])) if ii >= 0 else {}
+
 si = html.find('countryStats:{')
 STATS = {}
 for n, body in re.findall(r"'([^']+)':\{([^{}]*\bpop:[^{}]*)\}", html[si:si + 60000]):
@@ -231,11 +234,11 @@ def write_map(map_id, crop, W, H, allowed):
         mod = min(1.3, max(0.75, max(0.0001, rel) ** 0.4))
         return s['pop'] * 12000 * mod * (0.5 if s['halved'] else 1.0)
     blob = bytearray(b'ATLM')
-    blob += struct.pack('<HHHHH', 2, W, H, len(names) - 1, len(caps))
+    blob += struct.pack('<HHHHH', 3, W, H, len(names) - 1, len(caps))
     blob += struct.pack('<4f', L0, L1, A0, A1)
     for n in names[1:]:
         nb = n.encode(); r, g, b = color_for(n)
-        blob += struct.pack('<B', len(nb)) + nb + bytes((r, g, b)) + struct.pack('<4f', st[n]['pop'], st[n]['gdp'], st[n]['mil'], mobil(st[n]))
+        blob += struct.pack('<B', len(nb)) + nb + bytes((r, g, b)) + struct.pack('<4f', st[n]['pop'], st[n]['gdp'], st[n]['mil'], mobil(st[n])) + struct.pack('<B', len(ISO.get(n, ''))) + ISO.get(n, '').encode()
     for c in caps: blob += struct.pack('<HHH', *c)
     blob += land.tobytes() + cg.astype('<u2').tobytes() + outline.astype(np.uint8).tobytes() + inner.astype(np.uint8).tobytes()
     packed = zlib.compress(bytes(blob), 9)
