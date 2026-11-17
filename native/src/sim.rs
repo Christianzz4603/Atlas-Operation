@@ -95,6 +95,33 @@ const ASSIST_AI_BASE: f32 = 0.80;
 const ASSIST_AI_AGGRESSION_W: f32 = 0.20;
 const ASSIST_AI_STRENGTH_W: f32 = 0.10;
 
+// CONFIG.naval
+const NAVAL_LOAD_S: f32 = 5.2;
+const NAVAL_MANPOWER_PER_BOAT: f32 = 4000.0;
+const NAVAL_MAX_BOATS: u32 = 10;
+const NAVAL_BOAT_CELLS_PER_SEC: f32 = 11.0;
+const NAVAL_BEACHHEAD_CELLS: usize = 18;
+const NAVAL_MAX_SEA_DIST: i32 = 900;
+const NAVAL_SEARCH_BUDGET: usize = 400_000;
+const NAVAL_REPLAN_S: f32 = 1.5;
+const NAVAL_PATH_STRIDE: usize = 2;
+
+/// A sea route + boats for an amphibious landing (front.naval in the JS).
+#[derive(Clone, Default)]
+pub struct Naval {
+    pub embark: usize,
+    pub land: Option<usize>,
+    pub path: Vec<usize>,
+    pub len: usize,
+    pub load: f32,
+    /// travel progress 0..1 of each boat at sea
+    pub boats: Vec<f32>,
+    pub pending: u32,
+    pub manual: bool,
+    pub ai: bool,
+    pub port_id: Option<u32>,
+}
+
 #[derive(Clone)]
 pub struct AllyOffer {
     pub from: u16,
@@ -168,6 +195,8 @@ pub struct Front {
     pub push_combat_losses: f32,
     enc_tick: u64,
     enc_pocket: Option<Vec<usize>>,
+    pub naval: Option<Naval>,
+    naval_replan_at: f32,
 }
 
 pub struct Sim {
@@ -225,6 +254,8 @@ pub struct Sim {
     recent: HashMap<usize, u64>,
     enc_seen: Vec<u32>,
     enc_epoch: u32,
+    sea_dist: Vec<i32>,
+    sea_queue: Vec<u32>,
 }
 
 fn clamp01(v: f32) -> f32 {
@@ -336,6 +367,8 @@ impl Sim {
             recent: HashMap::new(),
             enc_seen: vec![0; w * h],
             enc_epoch: 0,
+            sea_dist: Vec::new(),
+            sea_queue: Vec::new(),
         };
         s.rebuild_adjacency(world);
         s
@@ -794,6 +827,389 @@ impl Sim {
         self.assists = keep;
     }
 
+
+    // ------------------------------------------------------------------ naval invasions
+    pub fn naval_max_boats(&self, att: u16) -> u32 {
+        (((self.manpower[att as usize] / NAVAL_MANPOWER_PER_BOAT).floor()) as u32).min(NAVAL_MAX_BOATS)
+    }
+
+    pub fn has_port(&self, map: &MapData, c: u16) -> bool {
+        !self.econ.ports_of(map, c).is_empty()
+    }
+
+    /// A random coastal spot to put a port (self-test helper).
+    pub fn econ_any_coastal_spot(&mut self, map: &MapData, country: u16) -> Option<(i32, i32)> {
+        let ctx = EconCtx {
+            names: &self.names,
+            cells: &self.cells,
+            orig: &self.orig_cells,
+            fallen: &self.capital_fallen,
+            eliminated: &self.eliminated,
+            pop: &self.pop,
+            gdp: &self.live_gdp,
+            bbox: &self.bbox,
+        };
+        self.econ.any_coastal_spot(map, country, &ctx)
+    }
+
+    /// _navalPlan: BFS over water from the defender's coast back to one of the attacker's ports.
+    fn naval_plan(&mut self, att: u16, def: u16, world: &World, manual_cell: Option<usize>) -> Option<Naval> {
+        let (w, h) = (self.w as i32, self.h as i32);
+        let wu = self.w;
+        let n = wu * self.h;
+        let map = &world.map;
+        let land = &map.land;
+        let owner = &map.owner;
+        let manual = manual_cell.is_some();
+        let ports = self.econ.ports_of(map, att);
+        if ports.is_empty() {
+            return None;
+        }
+        let mut port_water: HashMap<usize, u32> = HashMap::new();
+        for &bi in &ports {
+            let b = &self.econ.buildings[bi];
+            for wc in self.econ.port_water_cells(map, b) {
+                port_water.entry(wc).or_insert(b.id);
+            }
+        }
+        if port_water.is_empty() {
+            return None;
+        }
+        let coastal = |i: usize| -> bool {
+            let (x, y) = ((i % wu) as i32, (i / wu) as i32);
+            (x > 0 && land[i - 1] == 0) || (x < w - 1 && land[i + 1] == 0) || (y > 0 && land[i - wu] == 0) || (y < h - 1 && land[i + wu] == 0)
+        };
+        let bb = self.bbox[def as usize];
+        let mut def_cells: Vec<usize> = Vec::new();
+        if let Some(pc) = manual_cell {
+            let (px, py) = ((pc % wu) as i64, (pc / wu) as i64);
+            let mut best: Option<usize> = None;
+            let mut bd = i64::MAX;
+            for y in bb[1].max(0)..=bb[3].min(h - 1) {
+                for x in bb[0].max(0)..=bb[2].min(w - 1) {
+                    let i = (y * w + x) as usize;
+                    if owner[i] != def || !coastal(i) {
+                        continue;
+                    }
+                    let d = (x as i64 - px).pow(2) + (y as i64 - py).pow(2);
+                    if d < bd {
+                        bd = d;
+                        best = Some(i);
+                    }
+                }
+            }
+            def_cells.push(best?);
+        } else {
+            for y in bb[1].max(0)..=bb[3].min(h - 1) {
+                for x in bb[0].max(0)..=bb[2].min(w - 1) {
+                    let i = (y * w + x) as usize;
+                    if owner[i] == def && coastal(i) {
+                        def_cells.push(i);
+                    }
+                }
+            }
+        }
+        if self.sea_dist.len() != n {
+            self.sea_dist = vec![-1; n];
+            self.sea_queue = vec![0; n];
+        }
+        for v in self.sea_dist.iter_mut() {
+            *v = -1;
+        }
+        let mut coast_owner: HashMap<usize, usize> = HashMap::new();
+        let mut qt = 0usize;
+        for &i in &def_cells {
+            let (x, y) = ((i % wu) as i32, (i / wu) as i32);
+            let mut nbs: Vec<usize> = Vec::with_capacity(4);
+            if x > 0 { nbs.push(i - 1); }
+            if x < w - 1 { nbs.push(i + 1); }
+            if y > 0 { nbs.push(i - wu); }
+            if y < h - 1 { nbs.push(i + wu); }
+            for nb in nbs {
+                if land[nb] == 0 && self.sea_dist[nb] == -1 {
+                    self.sea_dist[nb] = 0;
+                    coast_owner.insert(nb, i);
+                    self.sea_queue[qt] = nb as u32;
+                    qt += 1;
+                }
+            }
+        }
+        if qt == 0 {
+            return None;
+        }
+        let max_d = if manual { i32::MAX } else { NAVAL_MAX_SEA_DIST };
+        let budget = if manual { n } else { NAVAL_SEARCH_BUDGET };
+        let mut start: Option<usize> = None;
+        let mut port_id: Option<u32> = None;
+        for i in 0..qt {
+            let c = self.sea_queue[i] as usize;
+            if let Some(&pid) = port_water.get(&c) {
+                start = Some(c);
+                port_id = Some(pid);
+                break;
+            }
+        }
+        let mut qh = 0usize;
+        let mut scanned = 0usize;
+        while start.is_none() && qh < qt && scanned < budget {
+            let cur = self.sea_queue[qh] as usize;
+            qh += 1;
+            scanned += 1;
+            let d = self.sea_dist[cur];
+            if d >= max_d {
+                continue;
+            }
+            let (cx, cy) = ((cur % wu) as i32, (cur / wu) as i32);
+            for k in 0..4 {
+                let (nx, ny) = (cx + if k == 0 { 1 } else if k == 1 { -1 } else { 0 }, cy + if k == 2 { 1 } else if k == 3 { -1 } else { 0 });
+                if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                    continue;
+                }
+                let ni = ny as usize * wu + nx as usize;
+                if land[ni] == 1 || self.sea_dist[ni] != -1 {
+                    continue;
+                }
+                self.sea_dist[ni] = d + 1;
+                if let Some(&pid) = port_water.get(&ni) {
+                    start = Some(ni);
+                    port_id = Some(pid);
+                    break;
+                }
+                if qt < n {
+                    self.sea_queue[qt] = ni as u32;
+                    qt += 1;
+                }
+            }
+        }
+        let start = start?;
+        let pid = port_id?;
+        let embark = {
+            let pb = self.econ.buildings.iter().find(|b| b.id == pid)?;
+            self.econ.port_anchor(pb)
+        };
+        let mut route: Vec<usize> = Vec::new();
+        let mut cur = start;
+        let mut guard = n + 4;
+        loop {
+            route.push(cur);
+            let d = self.sea_dist[cur];
+            if d <= 0 || guard == 0 {
+                break;
+            }
+            guard -= 1;
+            let (cx, cy) = ((cur % wu) as i32, (cur / wu) as i32);
+            let mut next: Option<usize> = None;
+            for k in 0..4 {
+                let (nx, ny) = (cx + if k == 0 { 1 } else if k == 1 { -1 } else { 0 }, cy + if k == 2 { 1 } else if k == 3 { -1 } else { 0 });
+                if nx < 0 || ny < 0 || nx >= w || ny >= h {
+                    continue;
+                }
+                let ni = ny as usize * wu + nx as usize;
+                if land[ni] == 0 && self.sea_dist[ni] == d - 1 {
+                    next = Some(ni);
+                    break;
+                }
+            }
+            match next {
+                Some(nx) => cur = nx,
+                None => break,
+            }
+        }
+        if route.is_empty() {
+            return None;
+        }
+        if route.len() == 1 {
+            route.push(route[0]);
+        }
+        let last = *route.last()?;
+        let target = *coast_owner.get(&last)?;
+        if owner[target] != def {
+            return None;
+        }
+        let mut path: Vec<usize> = Vec::new();
+        let mut i = 0;
+        while i < route.len() {
+            path.push(route[i]);
+            i += NAVAL_PATH_STRIDE;
+        }
+        if *path.last()? != last {
+            path.push(last);
+        }
+        Some(Naval { embark, land: Some(target), path, len: route.len(), load: 0.0, boats: Vec::new(), pending: 0, manual, ai: !manual, port_id: Some(pid) })
+    }
+
+    /// _navalLand: put a beachhead of troops ashore.
+    fn naval_land(&mut self, f: &mut Front, land: usize, world: &mut World) -> bool {
+        if world.map.owner[land] != f.defender {
+            return false;
+        }
+        let cost = self.cost_per_cell(f);
+        let take = NAVAL_BEACHHEAD_CELLS.min((f.committed / cost).floor() as usize);
+        if take == 0 {
+            return false;
+        }
+        let (w, h) = (self.w as i32, self.h as i32);
+        let wu = self.w;
+        let mut pocket: Vec<usize> = Vec::new();
+        let mut seen: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        let mut q: Vec<usize> = vec![land];
+        seen.insert(land);
+        let mut qi = 0;
+        while qi < q.len() && pocket.len() < take {
+            let c = q[qi];
+            qi += 1;
+            if world.map.owner[c] != f.defender {
+                continue;
+            }
+            pocket.push(c);
+            let (x, y) = ((c % wu) as i32, (c / wu) as i32);
+            let mut nbs: Vec<usize> = Vec::with_capacity(4);
+            if x < w - 1 { nbs.push(c + 1); }
+            if x > 0 { nbs.push(c - 1); }
+            if y < h - 1 { nbs.push(c + wu); }
+            if y > 0 { nbs.push(c - wu); }
+            for nb in nbs {
+                if seen.insert(nb) && world.map.owner[nb] == f.defender {
+                    q.push(nb);
+                }
+            }
+        }
+        if pocket.is_empty() {
+            return false;
+        }
+        self.capture_pocket(f, &pocket, cost, world);
+        let msg = format!("{} LANDS TROOPS IN {}", self.names[f.attacker as usize], self.names[f.defender as usize]);
+        self.say(msg);
+        true
+    }
+
+    /// _navalTick: load boats at the port, sail them along the route, land them. True while active.
+    fn naval_tick(&mut self, f: &mut Front, dt: f32, world: &mut World) -> bool {
+        let (att, def) = (f.attacker, f.defender);
+        let human = self.is_human(att);
+        if f.naval.is_none() && !human && f.committed > 0.0 && f.frontier.is_empty() && self.time - f.naval_replan_at >= NAVAL_REPLAN_S {
+            f.naval_replan_at = self.time;
+            if !self.econ.ports_of(&world.map, att).is_empty() {
+                if let Some(mut plan) = self.naval_plan(att, def, world, None) {
+                    plan.pending = 1;
+                    f.naval = Some(plan);
+                }
+            }
+        }
+        let Some(mut nv) = f.naval.take() else { return false };
+        // a boat is at sea: sail it
+        if !nv.boats.is_empty() && nv.path.len() > 1 {
+            nv.boats[0] = (nv.boats[0] + NAVAL_BOAT_CELLS_PER_SEC * dt / nv.len.max(1) as f32).min(1.0);
+            if nv.boats[0] >= 1.0 {
+                nv.boats.clear();
+                let ok = match nv.land {
+                    Some(l) => self.naval_land(f, l, world),
+                    None => false,
+                };
+                if !ok {
+                    nv.land = None;
+                }
+            }
+            if f.done {
+                return false;
+            }
+            f.naval = Some(nv);
+            return true;
+        }
+        let usable = match nv.land {
+            Some(l) => {
+                nv.path.len() > 1
+                    && world.map.owner[nv.embark] == att
+                    && world.map.owner[l] == def
+                    && nv.port_id.map_or(true, |pid| self.econ.ports_of(&world.map, att).iter().any(|&bi| self.econ.buildings[bi].id == pid))
+            }
+            None => false,
+        };
+        if !usable {
+            if self.time - f.naval_replan_at < NAVAL_REPLAN_S {
+                f.naval = Some(nv);
+                return true;
+            }
+            f.naval_replan_at = self.time;
+            let manual_cell = if nv.manual { nv.land } else { None };
+            match self.naval_plan(att, def, world, manual_cell) {
+                None => {
+                    if human && self.econ.ports_of(&world.map, att).is_empty() {
+                        let msg = format!("{} NEEDS A PORT TO REACH {}", self.names[att as usize], self.names[def as usize]);
+                        self.say(msg);
+                    }
+                    f.naval = None;
+                    return false;
+                }
+                Some(mut plan) => {
+                    plan.manual = nv.manual;
+                    plan.ai = !nv.manual;
+                    plan.pending = nv.pending;
+                    nv = plan;
+                }
+            }
+        }
+        if f.committed <= 0.0 {
+            nv.load = 0.0;
+            f.naval = Some(nv);
+            return true;
+        }
+        nv.load = (nv.load + dt / NAVAL_LOAD_S).min(1.0);
+        if nv.load >= 1.0 {
+            nv.load = 0.0;
+            if nv.pending > 0 {
+                nv.pending -= 1;
+                nv.boats.push(0.0);
+            }
+        }
+        if nv.pending == 0 && nv.boats.is_empty() {
+            f.naval = None;
+            return false;
+        }
+        f.naval = Some(nv);
+        true
+    }
+
+    /// launchNavalInvasion: send `boats` boats (4000 troops each) to land at `cell` inside `def`.
+    pub fn launch_naval(&mut self, att: u16, def: u16, cell: usize, boats: u32, world: &World) -> Result<(), &'static str> {
+        if att == def || !self.is_at_war(att, def) {
+            return Err("YOU ARE NOT AT WAR WITH THEM");
+        }
+        let map = &world.map;
+        if cell >= map.owner.len() || map.land[cell] != 1 || map.owner[cell] != def {
+            return Err("PICK A LANDING SPOT INSIDE THEIR LAND");
+        }
+        let n = boats.clamp(1, NAVAL_MAX_BOATS);
+        let pool = self.manpower[att as usize];
+        let floor = NAVAL_MANPOWER_PER_BOAT * n as f32;
+        if pool < floor {
+            return Err("NOT ENOUGH MANPOWER FOR THOSE BOATS");
+        }
+        if self.econ.ports_of(map, att).is_empty() {
+            return Err("YOU NEED A PORT TO REACH THEM");
+        }
+        let Some(mut plan) = self.naval_plan(att, def, world, Some(cell)) else { return Err("NO WATER PATH TO THAT SHORE") };
+        if self.commit(att, def, floor) <= 0.0 {
+            return Err("NOT ENOUGH MANPOWER");
+        }
+        let Some(fi) = self.fronts.iter().position(|f| f.attacker == att && f.defender == def && !f.done) else { return Err("NO FRONT") };
+        let f = &mut self.fronts[fi];
+        match &mut f.naval {
+            Some(old) if !old.boats.is_empty() => {
+                old.manual = true;
+                old.pending += n;
+            }
+            other => {
+                plan.manual = true;
+                plan.pending = other.as_ref().map_or(0, |o| o.pending) + n;
+                *other = Some(plan);
+            }
+        }
+        let msg = format!("{} SENDS {} BOAT{} TO {}", self.names[att as usize], n, if n > 1 { "S" } else { "" }, self.names[def as usize]);
+        self.say(msg);
+        Ok(())
+    }
+
     /// Pull the troops back from the front against `def` (the war itself stays on).
     pub fn stop_attack(&mut self, att: u16, def: u16) {
         for k in 0..self.fronts.len() {
@@ -1217,6 +1633,10 @@ impl Sim {
             f.committed = (f.committed - lost).max(0.0);
             f.push_combat_losses += lost;
         }
+        let naval_active = self.naval_tick(f, dt, world);
+        if f.done {
+            return;
+        }
         // --- _tickRealism
         let stalled = self.tick_realism(f, dt);
         let def_orig = self.orig_cells[d].max(1) as f32;
@@ -1259,7 +1679,9 @@ impl Sim {
             f.rebuild_at = self.tick + 16;
         }
         if f.frontier.is_empty() {
-            f.done = true; // the two countries no longer touch
+            if !naval_active {
+                f.done = true; // the two countries no longer touch and nothing is sailing
+            }
             return;
         }
         if take == 0 {

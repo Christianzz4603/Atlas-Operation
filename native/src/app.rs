@@ -71,6 +71,47 @@ fn date_string(days: f32) -> String {
 
 const RES_UNIT: [&str; 6] = ["B$", "kt bricks", "kt food", "kt steel", "kt oil", "kt uranium"];
 
+fn is_coastal(w: &World, i: usize) -> bool {
+    let m = &w.map;
+    let (mw, mh) = (m.w, m.h);
+    let (x, y) = (i % mw, i / mw);
+    (x > 0 && m.land[i - 1] == 0) || (x + 1 < mw && m.land[i + 1] == 0) || (y > 0 && m.land[i - mw] == 0) || (y + 1 < mh && m.land[i + mw] == 0)
+}
+
+/// _navalLandingCell: the tapped cell if it is the defender's land, else the nearest coastal cell.
+fn landing_cell(w: &World, def: u16, cx: i32, cy: i32, scale: f32) -> Option<usize> {
+    let m = &w.map;
+    let (mw, mh) = (m.w as i32, m.h as i32);
+    if cx >= 0 && cy >= 0 && cx < mw && cy < mh {
+        let i = (cy * mw + cx) as usize;
+        if m.land[i] == 1 && m.owner[i] == def {
+            return Some(i);
+        }
+    }
+    let radius = ((30.0 / scale.max(0.5)).ceil() as i32).clamp(3, 40);
+    let mut best: Option<usize> = None;
+    let mut bd = i64::MAX;
+    for y in (cy - radius).max(0)..=(cy + radius).min(mh - 1) {
+        for x in (cx - radius).max(0)..=(cx + radius).min(mw - 1) {
+            let i = (y * mw + x) as usize;
+            if m.owner[i] != def || m.land[i] != 1 || !is_coastal(w, i) {
+                continue;
+            }
+            let d = ((x - cx) as i64).pow(2) + ((y - cy) as i64).pow(2);
+            if d < bd {
+                bd = d;
+                best = Some(i);
+            }
+        }
+    }
+    best
+}
+
+fn any_coastal_cell(w: &World, def: u16) -> Option<usize> {
+    let m = &w.map;
+    (0..m.owner.len()).find(|&i| m.owner[i] == def && m.land[i] == 1 && is_coastal(w, i))
+}
+
 fn fmt_cost(c: &Stock) -> String {
     let mut parts: Vec<String> = Vec::new();
     if c[0] > 0.0 {
@@ -109,6 +150,9 @@ struct Play {
     slider_drag: bool,
     menu_open: bool,
     last_view: Vec2,
+    naval_mode: bool,
+    naval_cell: Option<usize>,
+    naval_boats: u32,
     build_open: bool,
     placing: Option<usize>,
     sel_building: Option<u32>,
@@ -119,6 +163,10 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     let world = World::load(MAPS[map_idx].data, MAPS[map_idx].ocean).expect("failed to load map");
     let seed = (macroquad::miniquad::date::now() * 1000.0) as u32;
     let mut sim = Sim::new(&world, seed);
+    if std::env::var("ATLAS_UITEST").is_ok() {
+        // the scripted UI test needs spare materials for ports etc.
+        sim.econ.stock[nation as usize] = [100.0, 500.0, 100.0, 500.0, 50.0, 5.0];
+    }
     sim.player = Some(nation);
     sim.paused = false;
     let cam = MapCamera::new(world.w(), world.h());
@@ -126,7 +174,7 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     sim.econ.fill_overlay(&mut img.bytes);
     let overlay = Texture2D::from_image(&img);
     overlay.set_filter(FilterMode::Nearest);
-    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, build_open: false, placing: None, sel_building: None, overlay }
+    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, build_open: false, placing: None, sel_building: None, overlay }
 }
 
 pub struct App {
@@ -178,10 +226,11 @@ impl App {
         if app.uitest.is_some() {
             // walk through every screen and press every button
             for id in [
-                "New Game", "map0", "nation:Germany", "Deploy", "BUILD", "build:farm", "place:auto", "select:neighbor", "WAR",
-                "SUPPORT", "pause", "Settings", "UI+", "UI-", "Close", "Resume", "speed+", "speed+", "speed-", "zoom+", "zoom-",
-                "STOP", "PEACE", "card-close", "select:other", "ALLY", "card-close", "select:building", "UPGRADE", "DISMANTLE",
-                "bcard-close", "BUILD", "build-close", "pause", "Restart", "pause", "Leave match", "Settings", "Close", "New Game", "back",
+                "New Game", "map0", "nation:Germany", "Deploy", "BUILD", "build:farm", "place:auto", "BUILD", "build:port", "place:coast",
+                "select:neighbor", "WAR", "NAVAL", "naval:tap", "SEND", "SUPPORT", "pause", "Settings", "UI+", "UI-", "Close", "Resume",
+                "speed+", "speed+", "speed-", "zoom+", "zoom-", "STOP", "PEACE", "card-close", "select:other", "ALLY", "card-close",
+                "select:building", "UPGRADE", "DISMANTLE", "bcard-close", "BUILD", "build-close", "pause", "Restart", "pause",
+                "Leave match", "Settings", "Close", "New Game", "back",
             ] {
                 app.gui.auto.push_back(id.to_string());
             }
@@ -546,8 +595,28 @@ impl App {
                 pl.target = Some(n as u16);
             }
         }
+        if g.auto_take("place:coast") {
+            if let Some(k) = pl.placing {
+                if let Some((gx, gy)) = pl.sim.econ_any_coastal_spot(&pl.world.map, p) {
+                    if pl.sim.econ.place(&pl.world.map, gx, gy, p, k).is_ok() {
+                        pl.placing = None;
+                    }
+                }
+            }
+        }
+        if g.auto_take("naval:tap") {
+            if let Some(t) = pl.target {
+                if let Some(c) = any_coastal_cell(&pl.world, t) {
+                    pl.naval_cell = Some(c);
+                    pl.naval_mode = false;
+                }
+            }
+        }
         if g.auto_take("select:neighbor") {
-            if let Some(n) = (1..pl.sim.n).find(|&b| b != pi && pl.sim.are_adjacent(p, b as u16)) {
+            let pick = (1..pl.sim.n)
+                .find(|&b| b != pi && pl.sim.are_adjacent(p, b as u16) && any_coastal_cell(&pl.world, b as u16).is_some())
+                .or_else(|| (1..pl.sim.n).find(|&b| b != pi && pl.sim.are_adjacent(p, b as u16)));
+            if let Some(n) = pick {
                 pl.target = Some(n as u16);
             }
         }
@@ -578,13 +647,42 @@ impl App {
         if let Some(k) = pl.placing {
             let (gcx, gcy) = pl.cam.screen_to_cell(ptr.pos);
             let (gx, gy) = (gcx - 2, gcy - 2);
-            let ok = pl.sim.econ.can_place(&pl.world.map, gx, gy, p);
+            let ok = pl.sim.econ.can_place(&pl.world.map, gx, gy, p, Some(k));
             let s = 4.0 * pl.cam.scale;
             let x = pl.cam.offset.x + gx as f32 * pl.cam.scale;
             let y = pl.cam.offset.y + gy as f32 * pl.cam.scale;
             draw_rectangle(x, y, s, s, if ok { Color::new(0.3, 0.9, 0.4, 0.6) } else { Color::new(0.9, 0.3, 0.3, 0.6) });
             let cc = CATALOG[k].color;
             draw_rectangle_lines(x, y, s, s, 2.0, col(cc[0], cc[1], cc[2]));
+        }
+
+        for f in &pl.sim.fronts {
+            let Some(nv) = &f.naval else { continue };
+            let ac = pl.world.map.countries[f.attacker as usize].rgb;
+            let mw = pl.world.map.w;
+            let cell_px = |i: usize| -> (f32, f32) {
+                (pl.cam.offset.x + ((i % mw) as f32 + 0.5) * pl.cam.scale, pl.cam.offset.y + ((i / mw) as f32 + 0.5) * pl.cam.scale)
+            };
+            let bs = (7.5 * pl.cam.scale).max(8.0);
+            if nv.boats.is_empty() && nv.pending > 0 {
+                let (ex, ey) = cell_px(nv.embark);
+                draw_rectangle(ex - bs * 0.6, ey - bs * 1.1, bs * 1.2, 4.0, Color::new(0.0, 0.0, 0.0, 0.6));
+                draw_rectangle(ex - bs * 0.6, ey - bs * 1.1, bs * 1.2 * nv.load, 4.0, WHITE);
+            }
+            if let Some(&t) = nv.boats.first() {
+                if nv.path.len() > 1 {
+                    let fi = t * (nv.path.len() - 1) as f32;
+                    let i0 = (fi.floor() as usize).min(nv.path.len() - 1);
+                    let i1 = (i0 + 1).min(nv.path.len() - 1);
+                    let (x0, y0) = cell_px(nv.path[i0]);
+                    let (x1, y1) = cell_px(nv.path[i1]);
+                    let k = fi - fi.floor();
+                    let (bx, by) = (x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+                    draw_rectangle(bx - bs * 0.6 - 1.5, by - bs * 0.35 - 1.5, bs * 1.2 + 3.0, bs * 0.7 + 3.0, Color::new(0.04, 0.06, 0.09, 0.95));
+                    draw_rectangle(bx - bs * 0.6, by - bs * 0.35, bs * 1.2, bs * 0.7, col(ac[0], ac[1], ac[2]));
+                    draw_triangle(vec2(bx + bs * 0.6, by - bs * 0.35), vec2(bx + bs * 0.6, by + bs * 0.35), vec2(bx + bs * 1.0, by), col(ac[0], ac[1], ac[2]));
+                }
+            }
         }
 
         g.enabled = !modal;
@@ -816,14 +914,19 @@ impl App {
             let amount = (pl.send_frac * pl.sim.manpower[pi]).floor();
             if t != p && !pl.sim.eliminated[ti] {
                 if at_war {
-                    let bw = (bw_all - 16.0 * u) / 3.0;
+                    let bw = (bw_all - 24.0 * u) / 4.0;
                     if g.button("SUPPORT", Rect::new(x0, by, bw, 48.0 * u), "SUPPORT", Style::Primary, avail > 0.0) {
                         pl.sim.commit(p, t, amount);
                     }
-                    if g.button("STOP", Rect::new(x0 + bw + 8.0 * u, by, bw, 48.0 * u), "STOP", Style::Secondary, true) {
+                    if g.button("NAVAL", Rect::new(x0 + (bw + 8.0 * u), by, bw, 48.0 * u), "NAVAL", Style::Secondary, pl.sim.has_port(&pl.world.map, p) && pl.sim.naval_max_boats(p) > 0) {
+                        pl.naval_mode = true;
+                        pl.naval_cell = None;
+                        pl.naval_boats = pl.naval_boats.clamp(1, pl.sim.naval_max_boats(p).max(1));
+                    }
+                    if g.button("STOP", Rect::new(x0 + 2.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "STOP", Style::Secondary, true) {
                         pl.sim.stop_attack(p, t);
                     }
-                    if g.button("PEACE", Rect::new(x0 + 2.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "PEACE", Style::Secondary, true) {
+                    if g.button("PEACE", Rect::new(x0 + 3.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "PEACE", Style::Secondary, true) {
                         pl.sim.propose_peace(p, t);
                     }
                 } else if pl.sim.are_allies(p, t) {
@@ -848,10 +951,53 @@ impl App {
             pl.target = None;
         }
 
+        // ---- naval targeting banner + invasion panel
+        if pl.naval_mode {
+            if let Some(t) = pl.target {
+                let w = (sw - 2.0 * m).min(520.0 * u);
+                let r = Rect::new((sw - w) / 2.0, below, w, 66.0 * u);
+                g.panel(r, c_panel());
+                g.text(&format!("Tap the coast of {} to land", pl.sim.names[t as usize]), r.x + 16.0 * u, r.y + 28.0 * u, 17.0, c_text());
+                g.text("Boats leave from your port", r.x + 16.0 * u, r.y + 50.0 * u, 13.0, c_accent());
+                if g.button("naval-cancel-mode", Rect::new(r.x + r.w - 16.0 * u - 110.0 * u, r.y + 10.0 * u, 110.0 * u, 46.0 * u), "Cancel", Style::Secondary, true) {
+                    pl.naval_mode = false;
+                }
+            } else {
+                pl.naval_mode = false;
+            }
+        }
+        if let (Some(cell), Some(t)) = (pl.naval_cell, pl.target) {
+            let max_b = pl.sim.naval_max_boats(p).max(1);
+            pl.naval_boats = pl.naval_boats.clamp(1, max_b);
+            let w = (sw - 2.0 * m).min(440.0 * u);
+            let r = Rect::new((sw - w) / 2.0, (sh - 220.0 * u) / 2.0, w, 220.0 * u);
+            g.panel(r, c_panel());
+            g.text(&format!("Naval invasion of {}", pl.sim.names[t as usize]), r.x + 18.0 * u, r.y + 38.0 * u, 20.0, c_text());
+            g.text(&format!("{} boats - {} troops", pl.naval_boats, fmt_num(pl.naval_boats as f32 * 4000.0)), r.x + 18.0 * u, r.y + 72.0 * u, 15.0, c_accent());
+            let bs = 46.0 * u;
+            if g.glyph_button("naval-minus", Rect::new(r.x + r.w - 18.0 * u - 2.0 * bs - 8.0 * u, r.y + 50.0 * u, bs, bs), Glyph::Minus, Style::Secondary, pl.naval_boats > 1) {
+                pl.naval_boats -= 1;
+            }
+            if g.glyph_button("naval-plus", Rect::new(r.x + r.w - 18.0 * u - bs, r.y + 50.0 * u, bs, bs), Glyph::Plus, Style::Secondary, pl.naval_boats < max_b) {
+                pl.naval_boats += 1;
+            }
+            let bw = (r.w - 44.0 * u) / 2.0;
+            let by = r.y + r.h - 16.0 * u - 52.0 * u;
+            if g.button("SEND", Rect::new(r.x + 16.0 * u, by, bw, 52.0 * u), "SEND", Style::Primary, true) {
+                match pl.sim.launch_naval(p, t, cell, pl.naval_boats, &pl.world) {
+                    Ok(()) => {}
+                    Err(e) => pl.sim.say(e.to_string()),
+                }
+                pl.naval_cell = None;
+            } else if g.button("naval-cancel", Rect::new(r.x + 28.0 * u + bw, by, bw, 52.0 * u), "Cancel", Style::Secondary, true) {
+                pl.naval_cell = None;
+            }
+        }
+
         // ---- build panel
         if pl.build_open && pl.placing.is_none() {
             let w = (sw - 2.0 * m).min(560.0 * u);
-            let row_h = 66.0 * u;
+            let row_h = 60.0 * u;
             let h = 64.0 * u + CATALOG.len() as f32 * row_h + 8.0 * u;
             let r = Rect::new((sw - w) / 2.0, (sh - h - m).max(m), w, h);
             g.panel(r, c_panel());
@@ -956,7 +1102,20 @@ impl App {
         // ---- tap on the map selects a country
         if !modal && g.ptr.tapped() && !g.consumed && !g.over_ui(g.ptr.press_pos) {
             let (cx, cy) = pl.cam.screen_to_cell(g.ptr.pos);
-            if let Some(k) = pl.placing {
+            if pl.naval_mode {
+                if let Some(t) = pl.target {
+                    match landing_cell(&pl.world, t, cx, cy, pl.cam.scale) {
+                        Some(c) => {
+                            pl.naval_cell = Some(c);
+                            pl.naval_mode = false;
+                        }
+                        None => {
+                            let msg = format!("PICK A LANDING SPOT INSIDE {}", pl.sim.names[t as usize]);
+                            pl.sim.say(msg);
+                        }
+                    }
+                }
+            } else if let Some(k) = pl.placing {
                 match pl.sim.econ.place(&pl.world.map, cx - 2, cy - 2, p, k) {
                     Ok(()) => {
                         let msg = format!("{} CONSTRUCTED {}", pl.sim.names[pi], CATALOG[k].kind.to_uppercase());

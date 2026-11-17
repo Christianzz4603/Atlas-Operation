@@ -69,6 +69,8 @@ pub struct Cat {
     pub spot: Option<usize>,
     pub dismantle_s: f32,
     pub special: Special,
+    /// must touch water (ports)
+    pub coastal: bool,
 }
 
 pub const IDX_FARM: usize = 0;
@@ -77,16 +79,19 @@ pub const IDX_METALFAB: usize = 2;
 pub const IDX_BANK: usize = 5;
 pub const IDX_CITY: usize = 6;
 pub const IDX_VILLAGE: usize = 7;
+pub const IDX_PORT: usize = 8;
+const PORT_WATER_REACH: i32 = 2;
 
-pub static CATALOG: [Cat; 8] = [
-    Cat { kind: "farm", name: "Farm", blurb: "Grows food that feeds your people and troops.", money: 9.0, need: &[], produces: Some((Res::Food, 2000.0)), color: [52, 168, 83], spot: Some(0), dismantle_s: 8.0, special: Special::None },
-    Cat { kind: "construction", name: "Construction", blurb: "Turns food into bricks.", money: 6.0, need: &[(Res::Food, 40.0)], produces: Some((Res::Bricks, 240.0)), color: [210, 126, 42], spot: Some(1), dismantle_s: 14.0, special: Special::None },
-    Cat { kind: "metalfab", name: "Metal Fabric", blurb: "Smelts bricks into steel.", money: 10.0, need: &[(Res::Bricks, 120.0)], produces: Some((Res::Steel, 127.5)), color: [90, 120, 168], spot: Some(2), dismantle_s: 16.0, special: Special::None },
-    Cat { kind: "oil", name: "Oil Derrick", blurb: "Pumps oil.", money: 12.0, need: &[(Res::Bricks, 85.0), (Res::Steel, 65.0)], produces: Some((Res::Oil, 17.0)), color: [91, 66, 119], spot: Some(3), dismantle_s: 12.0, special: Special::None },
-    Cat { kind: "uranium", name: "Uranium Mine", blurb: "Digs uranium.", money: 15.0, need: &[(Res::Bricks, 120.0), (Res::Steel, 90.0)], produces: Some((Res::Uranium, 0.85)), color: [160, 192, 48], spot: Some(4), dismantle_s: 15.0, special: Special::None },
-    Cat { kind: "bank", name: "Bank", blurb: "Earns extra money.", money: 19.0, need: &[(Res::Bricks, 150.0), (Res::Steel, 130.0)], produces: Some((Res::Money, 5.1)), color: [240, 180, 41], spot: None, dismantle_s: 10.0, special: Special::None },
-    Cat { kind: "city", name: "City", blurb: "Raises how many people your nation can hold.", money: 17.0, need: &[(Res::Bricks, 320.0), (Res::Food, 150.0)], produces: None, color: [200, 205, 214], spot: None, dismantle_s: 18.0, special: Special::City },
-    Cat { kind: "village", name: "Village", blurb: "Slowly adds population every year.", money: 5.0, need: &[(Res::Bricks, 55.0), (Res::Food, 30.0)], produces: None, color: [168, 140, 104], spot: None, dismantle_s: 10.0, special: Special::Village },
+pub static CATALOG: [Cat; 9] = [
+    Cat { kind: "farm", name: "Farm", blurb: "Grows food that feeds your people and troops.", money: 9.0, need: &[], produces: Some((Res::Food, 2000.0)), color: [52, 168, 83], spot: Some(0), dismantle_s: 8.0, special: Special::None, coastal: false },
+    Cat { kind: "construction", name: "Construction", blurb: "Turns food into bricks.", money: 6.0, need: &[(Res::Food, 40.0)], produces: Some((Res::Bricks, 240.0)), color: [210, 126, 42], spot: Some(1), dismantle_s: 14.0, special: Special::None, coastal: false },
+    Cat { kind: "metalfab", name: "Metal Fabric", blurb: "Smelts bricks into steel.", money: 10.0, need: &[(Res::Bricks, 120.0)], produces: Some((Res::Steel, 127.5)), color: [90, 120, 168], spot: Some(2), dismantle_s: 16.0, special: Special::None, coastal: false },
+    Cat { kind: "oil", name: "Oil Derrick", blurb: "Pumps oil.", money: 12.0, need: &[(Res::Bricks, 85.0), (Res::Steel, 65.0)], produces: Some((Res::Oil, 17.0)), color: [91, 66, 119], spot: Some(3), dismantle_s: 12.0, special: Special::None, coastal: false },
+    Cat { kind: "uranium", name: "Uranium Mine", blurb: "Digs uranium.", money: 15.0, need: &[(Res::Bricks, 120.0), (Res::Steel, 90.0)], produces: Some((Res::Uranium, 0.85)), color: [160, 192, 48], spot: Some(4), dismantle_s: 15.0, special: Special::None, coastal: false },
+    Cat { kind: "bank", name: "Bank", blurb: "Earns extra money.", money: 19.0, need: &[(Res::Bricks, 150.0), (Res::Steel, 130.0)], produces: Some((Res::Money, 5.1)), color: [240, 180, 41], spot: None, dismantle_s: 10.0, special: Special::None, coastal: false },
+    Cat { kind: "city", name: "City", blurb: "Raises how many people your nation can hold.", money: 17.0, need: &[(Res::Bricks, 320.0), (Res::Food, 150.0)], produces: None, color: [200, 205, 214], spot: None, dismantle_s: 18.0, special: Special::City, coastal: false },
+    Cat { kind: "village", name: "Village", blurb: "Slowly adds population every year.", money: 5.0, need: &[(Res::Bricks, 55.0), (Res::Food, 30.0)], produces: None, color: [168, 140, 104], spot: None, dismantle_s: 10.0, special: Special::Village, coastal: false },
+    Cat { kind: "port", name: "Port", blurb: "Lets your troops invade by sea. Must be on the coast.", money: 11.0, need: &[(Res::Bricks, 90.0), (Res::Steel, 70.0)], produces: None, color: [70, 150, 200], spot: None, dismantle_s: 12.0, special: Special::None, coastal: true },
 ];
 
 /// Village output in millions of people per year (level 1).
@@ -365,7 +370,57 @@ impl Econ {
         }
     }
 
-    pub fn can_place(&self, map: &MapData, gx: i32, gy: i32, country: u16) -> bool {
+    /// coastSideCounts(...).best: how much open water touches the best side of a footprint.
+    pub fn coast_best(&self, map: &MapData, gx: i32, gy: i32) -> i32 {
+        let s = BUILDING_SIZE;
+        let (w, h) = (self.w as i32, self.h as i32);
+        let water = |x: i32, y: i32| -> i32 { if x >= 0 && y >= 0 && x < w && y < h && map.land[(y * w + x) as usize] == 0 { 1 } else { 0 } };
+        let (mut south, mut west, mut north, mut east) = (0, 0, 0, 0);
+        for d in 1..=PORT_WATER_REACH {
+            for x in gx..gx + s {
+                south += water(x, gy + s - 1 + d);
+                north += water(x, gy - d);
+            }
+            for y in gy..gy + s {
+                east += water(gx + s - 1 + d, y);
+                west += water(gx - d, y);
+            }
+        }
+        south.max(west).max(north).max(east)
+    }
+
+    /// Indices of `country`'s working ports (portsOf).
+    pub fn ports_of(&self, map: &MapData, country: u16) -> Vec<usize> {
+        (0..self.buildings.len())
+            .filter(|&i| {
+                let b = &self.buildings[i];
+                b.kind == IDX_PORT && b.country == country && b.dismantle_at.is_none() && map.owner[self.port_anchor(b)] == country
+            })
+            .collect()
+    }
+
+    pub fn port_anchor(&self, b: &Building) -> usize {
+        (b.gy + BUILDING_SIZE / 2) as usize * self.w + (b.gx + BUILDING_SIZE / 2) as usize
+    }
+
+    /// Open-water cells within reach of a port (where ships can leave from).
+    pub fn port_water_cells(&self, map: &MapData, b: &Building) -> Vec<usize> {
+        let mut out = Vec::new();
+        for y in b.gy - PORT_WATER_REACH..b.gy + BUILDING_SIZE + PORT_WATER_REACH {
+            for x in b.gx - PORT_WATER_REACH..b.gx + BUILDING_SIZE + PORT_WATER_REACH {
+                if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
+                    continue;
+                }
+                let i = y as usize * self.w + x as usize;
+                if map.land[i] == 0 {
+                    out.push(i);
+                }
+            }
+        }
+        out
+    }
+
+    pub fn can_place(&self, map: &MapData, gx: i32, gy: i32, country: u16, kind: Option<usize>) -> bool {
         if gx < 0 || gy < 0 || gx + BUILDING_SIZE > self.w as i32 || gy + BUILDING_SIZE > self.h as i32 {
             return false;
         }
@@ -377,12 +432,17 @@ impl Econ {
                 }
             }
         }
+        if let Some(k) = kind {
+            if CATALOG[k].coastal && self.coast_best(map, gx, gy) <= 0 {
+                return false;
+            }
+        }
         true
     }
 
     // ------------------------------------------------------------------ actions
     pub fn place(&mut self, map: &MapData, gx: i32, gy: i32, country: u16, kind: usize) -> Result<(), &'static str> {
-        if !self.can_place(map, gx, gy, country) {
+        if !self.can_place(map, gx, gy, country, Some(kind)) {
             return Err("CAN'T BUILD THERE");
         }
         let cost = self.build_cost(kind);
@@ -539,6 +599,7 @@ impl Econ {
 
     fn ai_try_build(&mut self, c: usize, ctx: &EconCtx, map: &MapData) {
         let (r1, r2, r3) = (self.rng.f(), self.rng.f(), self.rng.f());
+        let want_port = self.ai_wants_port(c, ctx, map);
         let mine: Vec<usize> = (0..self.buildings.len())
             .filter(|&i| self.buildings[i].country as usize == c && self.buildings[i].dismantle_at.is_none())
             .collect();
@@ -551,6 +612,8 @@ impl Econ {
                 IDX_CONSTRUCTION
             } else if count_of(IDX_METALFAB) == 0 && afford(IDX_METALFAB) {
                 IDX_METALFAB
+            } else if count_of(IDX_PORT) == 0 && want_port && afford(IDX_PORT) {
+                IDX_PORT
             } else if count_of(IDX_CITY) <= count_of(IDX_BANK) {
                 IDX_CITY
             } else {
@@ -599,7 +662,8 @@ impl Econ {
         let want = CATALOG[kind].spot;
         let mut fallback: Option<(i32, i32)> = None;
         let mut attempts = 0;
-        for _ in 0..200 {
+        let tries = if CATALOG[kind].coastal { 2500 } else { 200 };
+        for _ in 0..tries {
             if attempts >= 6 {
                 break;
             }
@@ -608,7 +672,7 @@ impl Econ {
             if x < 0 || y < 0 || x as usize >= self.w || y as usize >= self.h {
                 continue;
             }
-            if map.owner[y as usize * self.w + x as usize] as usize != c || !self.can_place(map, x, y, c as u16) {
+            if map.owner[y as usize * self.w + x as usize] as usize != c || !self.can_place(map, x, y, c as u16, Some(kind)) {
                 continue;
             }
             attempts += 1;
@@ -627,6 +691,33 @@ impl Econ {
             }
         }
         fallback
+    }
+
+    /// A random coastal spot for a port (self-test helper).
+    pub fn any_coastal_spot(&mut self, map: &MapData, country: u16, ctx: &EconCtx) -> Option<(i32, i32)> {
+        self.find_spot(country as usize, IDX_PORT, ctx, map)
+    }
+
+    /// _aiWantsPort: does this country have any coast at all?
+    fn ai_wants_port(&mut self, c: usize, ctx: &EconCtx, map: &MapData) -> bool {
+        let bb = ctx.bbox[c];
+        if bb[2] < bb[0] || bb[3] < bb[1] {
+            return false;
+        }
+        let (w, h) = (self.w as i32, self.h as i32);
+        for _ in 0..400 {
+            let x = bb[0] + self.rng.range((bb[2] - bb[0] + 1) as usize) as i32;
+            let y = bb[1] + self.rng.range((bb[3] - bb[1] + 1) as usize) as i32;
+            if x < 0 || y < 0 || x >= w || y >= h || map.owner[(y * w + x) as usize] as usize != c {
+                continue;
+            }
+            let i = (y * w + x) as usize;
+            let wu = self.w;
+            if (x > 0 && map.land[i - 1] == 0) || (x < w - 1 && map.land[i + 1] == 0) || (y > 0 && map.land[i - wu] == 0) || (y < h - 1 && map.land[i + wu] == 0) {
+                return true;
+            }
+        }
+        false
     }
 
     /// A random spot where `country` can place a building (used by the self-test).
