@@ -430,6 +430,25 @@ impl Gui {
         }
     }
 
+    pub fn res_icon(&mut self, name: &str, r: Rect) {
+        let key = format!("res:{}", name);
+        let tex = self.flags.entry(key).or_insert_with(|| {
+            crate::restex::res_bytes(name)
+                .and_then(|b| Image::from_file_with_format(b, None).ok())
+                .map(|img| {
+                    let t = Texture2D::from_image(&img);
+                    t.set_filter(FilterMode::Linear);
+                    t
+                })
+        });
+        if let Some(t) = tex {
+            let (tw, th) = (t.width().max(1.0), t.height().max(1.0));
+            let k = (r.w / tw).min(r.h / th);
+            let (dw, dh) = (tw * k, th * k);
+            draw_texture_ex(t, r.x + (r.w - dw) / 2.0, r.y + (r.h - dh) / 2.0, WHITE, DrawTextureParams { dest_size: Some(vec2(dw, dh)), ..Default::default() });
+        }
+    }
+
     // ------------------------------------------------------------------ shell header (Back + title)
     pub fn header(&mut self, title: &str) -> bool {
         let u = self.u;

@@ -7,6 +7,8 @@
 //! NOT ported yet (approximated or skipped): supply, dig-in/regroup realism, focused attacks,
 //! naval invasions, alliances/assists, buildings/economy, missiles/nukes, ideology/policy,
 //! empires, victory points, population sim, news feed, enclave capture.
+use crate::econ::{Econ, EconCtx};
+use crate::mapdata::MapData;
 use crate::world::World;
 use std::collections::HashMap;
 
@@ -132,6 +134,9 @@ pub struct Front {
 pub struct Sim {
     pub n: usize,
     pub names: Vec<String>,
+    pub econ: Econ,
+    pop: Vec<f32>,
+    gdp: Vec<f32>,
     w: usize,
     h: usize,
     pub manpower: Vec<f32>,
@@ -222,10 +227,16 @@ impl Sim {
             capital[c.country as usize] = Some(c.y as usize * w + c.x as usize);
         }
         let names: Vec<String> = m.countries.iter().map(|c| c.name.to_uppercase()).collect();
+        let econ = Econ::new(m, seed ^ 0x9E37_79B9);
+        let pop: Vec<f32> = m.countries.iter().map(|c| c.pop).collect();
+        let gdp: Vec<f32> = m.countries.iter().map(|c| c.gdp).collect();
         let orig_cells = cells.clone();
         let mut s = Sim {
             n,
             names,
+            econ,
+            pop,
+            gdp,
             w,
             h,
             manpower,
@@ -293,7 +304,7 @@ impl Sim {
         self.max_pool[id] * self.territory_scale(id)
     }
 
-    fn say(&mut self, s: String) {
+    pub fn say(&mut self, s: String) {
         self.log.push((s, self.time));
         if self.log.len() > 12 {
             self.log.remove(0);
@@ -458,6 +469,21 @@ impl Sim {
         }
     }
 
+    /// A random free spot where `country` may build (self-test helper).
+    pub fn econ_any_spot(&mut self, map: &MapData, country: u16) -> Option<(i32, i32)> {
+        let ctx = EconCtx {
+            names: &self.names,
+            cells: &self.cells,
+            orig: &self.orig_cells,
+            fallen: &self.capital_fallen,
+            eliminated: &self.eliminated,
+            pop: &self.pop,
+            gdp: &self.gdp,
+            bbox: &self.bbox,
+        };
+        self.econ.any_spot(map, country, &ctx)
+    }
+
     pub fn decline_offer(&mut self, from: u16) {
         self.peace_offers.retain(|&x| x != from);
         self.offer_cd[from as usize] = self.time + 15.0;
@@ -547,6 +573,19 @@ impl Sim {
             self.peace_pass(t);
         }
         self.regen(sd);
+        {
+            let ctx = EconCtx {
+                names: &self.names,
+                cells: &self.cells,
+                orig: &self.orig_cells,
+                fallen: &self.capital_fallen,
+                eliminated: &self.eliminated,
+                pop: &self.pop,
+                gdp: &self.gdp,
+                bbox: &self.bbox,
+            };
+            self.econ.step(sd, &ctx, &world.map, self.player, self.time);
+        }
         let now = self.time;
         self.log.retain(|(_, t)| now - *t < 30.0);
     }

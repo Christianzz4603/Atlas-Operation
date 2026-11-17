@@ -3,6 +3,7 @@
 use crate::camera::MapCamera;
 use crate::config::{log, Config};
 use crate::input::Input;
+use crate::econ::{Res, CATALOG, RARITY, Stock};
 use crate::sim::Sim;
 use crate::ui::*;
 use crate::world::World;
@@ -68,6 +69,21 @@ fn date_string(days: f32) -> String {
     format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
+const RES_UNIT: [&str; 6] = ["B$", "kt bricks", "kt food", "kt steel", "kt oil", "kt uranium"];
+
+fn fmt_cost(c: &Stock) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if c[0] > 0.0 {
+        parts.push(format!("${:.0}B", c[0]));
+    }
+    for r in 1..6 {
+        if c[r] > 0.0 {
+            parts.push(format!("{:.0} {}", c[r], &RES_UNIT[r][3..]));
+        }
+    }
+    parts.join("  ")
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
     Menu,
@@ -93,6 +109,10 @@ struct Play {
     slider_drag: bool,
     menu_open: bool,
     last_view: Vec2,
+    build_open: bool,
+    placing: Option<usize>,
+    sel_building: Option<u32>,
+    overlay: Texture2D,
 }
 
 fn make_play(map_idx: usize, nation: u16) -> Play {
@@ -102,7 +122,11 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     sim.player = Some(nation);
     sim.paused = false;
     let cam = MapCamera::new(world.w(), world.h());
-    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO }
+    let mut img = Image::gen_image_color(world.map.w as u16, world.map.h as u16, Color::new(0.0, 0.0, 0.0, 0.0));
+    sim.econ.fill_overlay(&mut img.bytes);
+    let overlay = Texture2D::from_image(&img);
+    overlay.set_filter(FilterMode::Nearest);
+    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, build_open: false, placing: None, sel_building: None, overlay }
 }
 
 pub struct App {
@@ -155,7 +179,7 @@ impl App {
             // walk through every screen and press every button
             for id in [
                 "New Game", "map0", "nation:Germany", "Deploy", "select:neighbor", "WAR", "SUPPORT", "pause", "Settings",
-                "UI+", "UI-", "Close", "Resume", "speed+", "speed+", "speed-", "zoom+", "zoom-", "STOP", "PEACE", "card-close",
+                "UI+", "UI-", "Close", "Resume", "speed+", "speed+", "speed-", "zoom+", "zoom-", "STOP", "PEACE", "card-close", "BUILD", "build:farm", "place:auto", "select:building", "UPGRADE", "bcard-close", "BUILD", "build-close",
                 "pause", "Restart", "pause", "Leave match", "Settings", "Close", "New Game", "back",
             ] {
                 app.gui.auto.push_back(id.to_string());
@@ -502,6 +526,19 @@ impl App {
         }
         pl.world.flush();
 
+        if g.auto_take("place:auto") {
+            if let Some(k) = pl.placing {
+                if let Some((gx, gy)) = pl.sim.econ_any_spot(&pl.world.map, p) {
+                    if pl.sim.econ.place(&pl.world.map, gx, gy, p, k).is_ok() {
+                        pl.placing = None;
+                    }
+                }
+            }
+        }
+        if g.auto_take("select:building") {
+            pl.sel_building = pl.sim.econ.buildings.iter().find(|b| b.country == p).map(|b| b.id);
+            pl.target = None;
+        }
         if g.auto_take("select:neighbor") {
             if let Some(n) = (1..pl.sim.n).find(|&b| b != pi && pl.sim.are_adjacent(p, b as u16)) {
                 pl.target = Some(n as u16);
@@ -510,6 +547,38 @@ impl App {
 
         clear_background(Color::from_rgba(58, 111, 143, 255));
         pl.world.draw(&pl.cam);
+        if pl.placing.is_some() {
+            let (mw, mh) = (pl.world.w() * pl.cam.scale, pl.world.h() * pl.cam.scale);
+            draw_texture_ex(&pl.overlay, pl.cam.offset.x.round(), pl.cam.offset.y.round(), WHITE, DrawTextureParams { dest_size: Some(vec2(mw, mh)), ..Default::default() });
+        }
+        for b in &pl.sim.econ.buildings {
+            let cat = &CATALOG[b.kind];
+            let s = (4.0 * pl.cam.scale).max(4.0);
+            let x = pl.cam.offset.x + b.gx as f32 * pl.cam.scale;
+            let y = pl.cam.offset.y + b.gy as f32 * pl.cam.scale;
+            if x > sw || y > sh || x + s < 0.0 || y + s < 0.0 {
+                continue;
+            }
+            let mine = b.country == p;
+            draw_rectangle(x - 1.0, y - 1.0, s + 2.0, s + 2.0, if mine { Color::new(1.0, 1.0, 1.0, 0.95) } else { Color::new(0.05, 0.07, 0.09, 0.9) });
+            draw_rectangle(x, y, s, s, col(cat.color[0], cat.color[1], cat.color[2]));
+            if s >= 12.0 {
+                for l in 0..b.level {
+                    draw_rectangle(x + 2.0 + l as f32 * s * 0.22, y + s - s * 0.22, s * 0.16, s * 0.16, Color::new(0.05, 0.07, 0.09, 0.95));
+                }
+            }
+        }
+        if let Some(k) = pl.placing {
+            let (gcx, gcy) = pl.cam.screen_to_cell(ptr.pos);
+            let (gx, gy) = (gcx - 2, gcy - 2);
+            let ok = pl.sim.econ.can_place(&pl.world.map, gx, gy, p);
+            let s = 4.0 * pl.cam.scale;
+            let x = pl.cam.offset.x + gx as f32 * pl.cam.scale;
+            let y = pl.cam.offset.y + gy as f32 * pl.cam.scale;
+            draw_rectangle(x, y, s, s, if ok { Color::new(0.3, 0.9, 0.4, 0.6) } else { Color::new(0.9, 0.3, 0.3, 0.6) });
+            let cc = CATALOG[k].color;
+            draw_rectangle_lines(x, y, s, s, 2.0, col(cc[0], cc[1], cc[2]));
+        }
 
         g.enabled = !modal;
         let m = 10.0 * u;
@@ -559,7 +628,48 @@ impl App {
         g.text(&stats, pill.x + 60.0 * u, pill.y + 44.0 * u, 13.0, c_accent());
 
         // ---- peace offers
-        let mut below = pill.y + pill.h + 10.0 * u;
+        // ---- resource bar (resource-bar in the HTML)
+        let st = pl.sim.econ.stock[pi];
+        let items: [(&str, String); 7] = [
+            ("population", format!("{:.1}M", pc.pop)),
+            ("bricks", format!("{:.0}kt", st[1])),
+            ("food", format!("{:.1}kt", st[2])),
+            ("money", format!("${:.1}B", st[0])),
+            ("steel", format!("{:.0}kt", st[3])),
+            ("oil", format!("{:.1}kt", st[4])),
+            ("uranium", format!("{:.2}kt", st[5])),
+        ];
+        let rb_x0 = pill.x;
+        let rb_x1 = pill.x + pill.w;
+        let chip_h = 30.0 * u;
+        let mut chip_x = rb_x0;
+        let mut chip_y = pill.y + pill.h + 6.0 * u;
+        for (name, val) in items.iter() {
+            let cw_chip = 34.0 * u + g.text_w(val, 14.0) + 8.0 * u;
+            if chip_x + cw_chip > rb_x1 && chip_x > rb_x0 {
+                chip_x = rb_x0;
+                chip_y += chip_h + 4.0 * u;
+            }
+            g.rrect(chip_x, chip_y, cw_chip, chip_h, 9.0 * u, c_panel());
+            g.block(Rect::new(chip_x, chip_y, cw_chip, chip_h));
+            g.res_icon(name, Rect::new(chip_x + 5.0 * u, chip_y + 4.0 * u, 22.0 * u, 22.0 * u));
+            g.text(val, chip_x + 32.0 * u, chip_y + chip_h / 2.0 + 5.0 * u, 14.0, c_text());
+            chip_x += cw_chip + 5.0 * u;
+        }
+        let mut below = chip_y + chip_h + 10.0 * u;
+
+        // ---- placing banner
+        if let Some(k) = pl.placing {
+            let w = (sw - 2.0 * m).min(520.0 * u);
+            let r = Rect::new((sw - w) / 2.0, below, w, 66.0 * u);
+            g.panel(r, c_panel());
+            g.text(&format!("Place {} - tap the map", CATALOG[k].name), r.x + 16.0 * u, r.y + 28.0 * u, 17.0, c_text());
+            g.text(&fmt_cost(&pl.sim.econ.build_cost(k)), r.x + 16.0 * u, r.y + 50.0 * u, 13.0, c_accent());
+            if g.button("place-cancel", Rect::new(r.x + r.w - 16.0 * u - 110.0 * u, r.y + 10.0 * u, 110.0 * u, 46.0 * u), "Cancel", Style::Secondary, true) {
+                pl.placing = None;
+            }
+            below += 76.0 * u;
+        }
         if let Some(&from) = pl.sim.peace_offers.first() {
             let w = (sw - 20.0 * u).min(440.0 * u);
             let r = Rect::new((sw - w) / 2.0, below, w, 96.0 * u);
@@ -610,13 +720,25 @@ impl App {
         let track = Rect::new(sl.x + 22.0 * u, sl.y + 46.0 * u, sl.w - 44.0 * u, 11.0 * u);
         g.slider(track, &mut pl.send_frac, &mut pl.slider_drag, avail > 0.0);
 
+        // ---- BUILD button
+        let build_btn = if portrait {
+            Rect::new(m, sl.y - m - 54.0 * u, sw - 2.0 * m, 54.0 * u)
+        } else {
+            Rect::new(sl.x - m - 120.0 * u, sl.y, 120.0 * u, sl_h)
+        };
+        if pl.placing.is_none() && g.button("BUILD", build_btn, "BUILD", Style::Primary, true) {
+            pl.build_open = !pl.build_open;
+            pl.target = None;
+            pl.sel_building = None;
+        }
+
         // ---- country card (bottom-left)
         let mut close_card = false;
-        if let Some(t) = pl.target {
+        if let (Some(t), false) = (pl.target, pl.build_open) {
             let ti = t as usize;
-            let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 3.0 * m).clamp(240.0 * u, 380.0 * u) };
+            let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 128.0 * u - 4.0 * m).clamp(240.0 * u, 380.0 * u) };
             let chh = 296.0 * u;
-            let cy = if portrait { sl.y - m - chh } else { sh - m - chh };
+            let cy = if portrait { sl.y - m - 54.0 * u - m - chh } else { sh - m - chh };
             let card = Rect::new(m, cy, cw, chh);
             g.panel(card, c_panel());
             let tc = &pl.world.map.countries[ti];
@@ -691,13 +813,112 @@ impl App {
             pl.target = None;
         }
 
+        // ---- build panel
+        if pl.build_open && pl.placing.is_none() {
+            let w = (sw - 2.0 * m).min(560.0 * u);
+            let row_h = 66.0 * u;
+            let h = 64.0 * u + CATALOG.len() as f32 * row_h + 8.0 * u;
+            let r = Rect::new((sw - w) / 2.0, (sh - h - m).max(m), w, h);
+            g.panel(r, c_panel());
+            g.text("Build", r.x + 18.0 * u, r.y + 40.0 * u, 26.0, c_text());
+            if g.glyph_button("build-close", Rect::new(r.x + r.w - 14.0 * u - 40.0 * u, r.y + 12.0 * u, 40.0 * u, 40.0 * u), Glyph::Close, Style::Secondary, true) {
+                pl.build_open = false;
+            }
+            let mut ry = r.y + 64.0 * u;
+            for (i, cat) in CATALOG.iter().enumerate() {
+                let cost = pl.sim.econ.build_cost(i);
+                let ok = pl.sim.econ.can_afford(pi, &cost);
+                let row = Rect::new(r.x + 10.0 * u, ry, r.w - 20.0 * u, row_h - 6.0 * u);
+                g.rrect(row.x, row.y, row.w, row.h, 10.0 * u, if ok { c_panel2() } else { col(24, 30, 38) });
+                draw_rectangle(row.x + 12.0 * u, row.y + 12.0 * u, 34.0 * u, 34.0 * u, col(cat.color[0], cat.color[1], cat.color[2]));
+                g.text(cat.name, row.x + 58.0 * u, row.y + 26.0 * u, 18.0, if ok { c_text() } else { c_faint() });
+                g.text(&fmt_cost(&cost), row.x + 58.0 * u, row.y + 48.0 * u, 13.0, if ok { c_accent() } else { c_red() });
+                let unit = &RES_UNIT[cat.produces.0 as usize];
+                g.text_r(&format!("+{:.1} {}/yr", cat.produces.1, unit), row.x + row.w - 12.0 * u, row.y + 26.0 * u, 13.0, c_dim());
+                if g.tapped(&format!("build:{}", cat.kind), row) && ok {
+                    pl.placing = Some(i);
+                    pl.build_open = false;
+                }
+                ry += row_h;
+            }
+        }
+
+        // ---- building card
+        let mut close_bcard = false;
+        if let Some(bid) = pl.sel_building {
+            if let Some(bi) = pl.sim.econ.buildings.iter().position(|b| b.id == bid) {
+                let b = pl.sim.econ.buildings[bi].clone();
+                let cat = &CATALOG[b.kind];
+                let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 128.0 * u - 4.0 * m).clamp(240.0 * u, 380.0 * u) };
+                let chh = 250.0 * u;
+                let cy = if portrait { sl.y - m - 54.0 * u - m - chh } else { sh - m - chh };
+                let card = Rect::new(m, cy, cw, chh);
+                g.panel(card, c_panel());
+                let x0 = card.x + 16.0 * u;
+                draw_rectangle(x0, card.y + 16.0 * u, 30.0 * u, 30.0 * u, col(cat.color[0], cat.color[1], cat.color[2]));
+                g.text(&format!("{}  Lv {}", cat.name, b.level), x0 + 40.0 * u, card.y + 38.0 * u, 20.0, c_text());
+                if g.glyph_button("bcard-close", Rect::new(card.x + card.w - 14.0 * u - 38.0 * u, card.y + 10.0 * u, 38.0 * u, 38.0 * u), Glyph::Close, Style::Secondary, true) {
+                    close_bcard = true;
+                }
+                g.text(&format!("Owner: {}", pl.sim.names[b.country as usize]), x0, card.y + 70.0 * u, 13.0, c_dim());
+                let out = pl.sim.econ.output_per_year(&b);
+                g.text("OUTPUT", x0, card.y + 100.0 * u, 13.0, c_dim());
+                g.text_r(&format!("+{:.1} {}/yr", out, RES_UNIT[cat.produces.0 as usize]), card.x + card.w - 16.0 * u, card.y + 100.0 * u, 15.0, c_text());
+                let spot = match (cat.spot, pl.sim.econ.resource_at(b.gx, b.gy)) {
+                    (Some(k), Some((rk, tier))) if rk == k => format!("On a {} deposit (x{:.2})", RARITY[tier.min(2)].0, RARITY[tier.min(2)].2),
+                    (Some(_), _) => "No matching deposit here".to_string(),
+                    _ => String::new(),
+                };
+                g.text(&spot, x0, card.y + 128.0 * u, 13.0, c_accent());
+                if b.country == p {
+                    let by = card.y + card.h - 14.0 * u - 48.0 * u;
+                    match pl.sim.econ.upgrade_cost(&b) {
+                        Some(uc) => {
+                            g.text(&format!("Upgrade: {}", fmt_cost(&uc)), x0, by - 10.0 * u, 13.0, c_dim());
+                            let can = pl.sim.econ.can_afford(pi, &uc);
+                            if g.button("UPGRADE", Rect::new(x0, by, card.w - 32.0 * u, 48.0 * u), "UPGRADE", Style::Primary, can) {
+                                let msg = match pl.sim.econ.upgrade(b.id, p) {
+                                    Ok(l) => format!("{} UPGRADED {} TO LVL {}", pl.sim.names[pi], cat.kind.to_uppercase(), l),
+                                    Err(e) => e.to_string(),
+                                };
+                                pl.sim.say(msg);
+                            }
+                        }
+                        None => g.text("MAX LEVEL", x0, by + 30.0 * u, 18.0, c_accent()),
+                    }
+                }
+            } else {
+                pl.sel_building = None;
+            }
+        }
+        if close_bcard {
+            pl.sel_building = None;
+        }
+
         // ---- tap on the map selects a country
         if !modal && g.ptr.tapped() && !g.consumed && !g.over_ui(g.ptr.press_pos) {
             let (cx, cy) = pl.cam.screen_to_cell(g.ptr.pos);
-            let id = pl.world.owner_at(cx, cy);
-            pl.target = if id == 0 { None } else { Some(id) };
-            if id != 0 && id != p && pl.send_frac < 0.05 {
-                pl.send_frac = 0.25;
+            if let Some(k) = pl.placing {
+                match pl.sim.econ.place(&pl.world.map, cx - 2, cy - 2, p, k) {
+                    Ok(()) => {
+                        let msg = format!("{} CONSTRUCTED {}", pl.sim.names[pi], CATALOG[k].kind.to_uppercase());
+                        pl.sim.say(msg);
+                        pl.placing = None;
+                    }
+                    Err(e) => pl.sim.say(e.to_string()),
+                }
+            } else if !pl.build_open {
+                if let Some(bi) = pl.sim.econ.building_at(cx, cy) {
+                    pl.sel_building = Some(pl.sim.econ.buildings[bi].id);
+                    pl.target = None;
+                } else {
+                    pl.sel_building = None;
+                    let id = pl.world.owner_at(cx, cy);
+                    pl.target = if id == 0 { None } else { Some(id) };
+                    if id != 0 && id != p && pl.send_frac < 0.05 {
+                        pl.send_frac = 0.25;
+                    }
+                }
             }
         }
 
