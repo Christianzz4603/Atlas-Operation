@@ -70,6 +70,45 @@ const AI_RETALIATE_CAP: f32 = 0.55;
 const AI_COMMIT_COOLDOWN_S: f32 = 6.0;
 /// Wars with no front on either side for this long are quietly ended (simplification).
 const STALE_WAR_S: f32 = 60.0;
+// CONFIG.troopFood
+const UPKEEP_PER_MANPOWER_KT_DAY: f32 = 0.000011;
+const TROOP_FOOD_RESERVE: f32 = 0.05;
+const STARVE_RETURN_FRAC: f32 = 0.015;
+const MIN_WAR_DAYS: f32 = 4.0;
+// CONFIG.populationSim
+const POP_GROWTH_FULL_MONTHS: f32 = 5.2;
+const POP_PEACETIME_CAP_MULT: f32 = 1.8;
+const POP_WAR_GROWTH_MULT: f32 = 0.55;
+const POP_MIN_FRAC: f32 = 0.05;
+const POP_LONG_TERM_GROWTH_PER_YEAR: f32 = 0.03;
+const POP_LONG_TERM_MAX_MULT: f32 = 1.25;
+const VILLAGE_MAX_POP_BONUS: f32 = 0.15;
+const GROWTH_SCALE_MAX: f32 = 2.5;
+const OUTPUT_SCALE_EXP: f32 = 0.7;
+// alliances / war assists (CONFIG.ai, CONFIG.war)
+const ALLIANCE_ACCEPT_THRESHOLD: f32 = 0.55;
+const ALLIANCE_MP_WEIGHT: f32 = 0.9;
+const ALLY_OFFER_S: f32 = 10.0;
+const OFFER_COOLDOWN_S: f32 = 15.0;
+const ASSIST_REQUEST_S: f32 = 15.0;
+const ASSIST_AI_BASE: f32 = 0.80;
+const ASSIST_AI_AGGRESSION_W: f32 = 0.20;
+const ASSIST_AI_STRENGTH_W: f32 = 0.10;
+
+#[derive(Clone)]
+pub struct AllyOffer {
+    pub from: u16,
+    pub to: u16,
+    pub created: f32,
+}
+
+#[derive(Clone)]
+pub struct Assist {
+    pub caller: u16,
+    pub helper: u16,
+    pub target: u16,
+    pub created: f32,
+}
 // CONFIG.war (realism / mop-up)
 const RECAPTURE_HOLD_TICKS: u64 = 3;
 const MOPUP_MULT: f32 = 2.0;
@@ -135,8 +174,17 @@ pub struct Sim {
     pub n: usize,
     pub names: Vec<String>,
     pub econ: Econ,
-    pop: Vec<f32>,
+    /// live population in millions (population sim)
+    pub pop: Vec<f32>,
+    pop_base: Vec<f32>,
+    prev_cells: Vec<u32>,
     gdp: Vec<f32>,
+    live_gdp: Vec<f32>,
+    density_ref: f32,
+    allies: Vec<bool>,
+    ally_cd: Vec<f32>,
+    pub ally_offers: Vec<AllyOffer>,
+    pub assists: Vec<Assist>,
     w: usize,
     h: usize,
     pub manpower: Vec<f32>,
@@ -230,13 +278,25 @@ impl Sim {
         let econ = Econ::new(m, seed ^ 0x9E37_79B9);
         let pop: Vec<f32> = m.countries.iter().map(|c| c.pop).collect();
         let gdp: Vec<f32> = m.countries.iter().map(|c| c.gdp).collect();
+        let pop_base: Vec<f32> = pop.iter().map(|p| p.max(0.05)).collect();
+        let live_gdp = gdp.clone();
+        let prev_cells = cells.clone();
+        let density_ref = pop_base.iter().skip(1).sum::<f32>() / (cells.iter().sum::<u32>() as f32).max(1.0);
         let orig_cells = cells.clone();
         let mut s = Sim {
             n,
             names,
             econ,
             pop,
+            pop_base,
+            prev_cells,
             gdp,
+            live_gdp,
+            density_ref,
+            allies: vec![false; n * n],
+            ally_cd: vec![0.0; n * n],
+            ally_offers: Vec::new(),
+            assists: Vec::new(),
             w,
             h,
             manpower,
@@ -382,6 +442,15 @@ impl Sim {
         if a == b || self.eliminated[ai] || self.eliminated[bi] || self.at_war[ai * self.n + bi] || self.war_locked(a, b) {
             return false;
         }
+        if self.are_allies(a, b) {
+            return false;
+        }
+        if !self.has_war_food(a) {
+            if self.is_human(a) {
+                self.say("NOT ENOUGH FOOD TO GO TO WAR".to_string());
+            }
+            return false;
+        }
         self.at_war[ai * self.n + bi] = true;
         self.at_war[bi * self.n + ai] = true;
         self.war_idle[ai * self.n + bi] = 0.0;
@@ -389,6 +458,7 @@ impl Sim {
         self.peace_offers.retain(|&x| x != a && x != b);
         let msg = format!("{} DECLARES WAR ON {}", self.names[ai], self.names[bi]);
         self.say(msg);
+        self.offer_war_assist(a, b);
         if self.is_human(a) && !self.is_human(b) {
             self.ai_commit(b, a, true); // _aiRetaliate
         }
@@ -458,6 +528,270 @@ impl Sim {
     pub fn commit_fraction(&mut self, att: u16, def: u16, frac: f32) -> f32 {
         let amount = (self.manpower[att as usize] * frac).floor();
         self.commit(att, def, amount)
+    }
+
+
+    // ------------------------------------------------------------------ troop food + war food
+    /// hasWarFood: you need enough food stock to feed the smallest legal commitment for a few days.
+    pub fn has_war_food(&self, c: u16) -> bool {
+        let pool = self.manpower[c as usize];
+        if pool <= 0.0 {
+            return true;
+        }
+        let food = self.econ.stock[c as usize][2];
+        let spendable = (food - food * TROOP_FOOD_RESERVE).max(0.0);
+        let minimum_commit = pool.min(MIN_COMMIT);
+        spendable >= minimum_commit * UPKEEP_PER_MANPOWER_KT_DAY * MIN_WAR_DAYS
+    }
+
+    /// Committed troops eat food every day; unpaid upkeep sends them home.
+    fn troop_food(&mut self, dt: f32) {
+        let n = self.n;
+        let mut committed = vec![0.0f32; n];
+        for f in self.fronts.iter().filter(|f| !f.done) {
+            committed[f.attacker as usize] += f.committed.max(0.0);
+        }
+        for c in 1..n {
+            let total = committed[c];
+            if total <= 0.0 {
+                continue;
+            }
+            let due = total * UPKEEP_PER_MANPOWER_KT_DAY * dt;
+            let food = self.econ.stock[c][2];
+            let spendable = (food - food * TROOP_FOOD_RESERVE).max(0.0);
+            let paid = due.min(spendable);
+            if paid > 0.0 {
+                self.econ.stock[c][2] = (food - paid).max(0.0);
+            }
+            let short = due - paid;
+            if short <= 0.0 {
+                continue;
+            }
+            let unpaid = clamp01(short / (total * UPKEEP_PER_MANPOWER_KT_DAY * dt).max(1e-12));
+            let starving = total * (1.0 - (-STARVE_RETURN_FRAC * unpaid * dt).exp());
+            if starving <= 0.0 {
+                continue;
+            }
+            let mut returned = 0.0f32;
+            for f in self.fronts.iter_mut().filter(|f| !f.done && f.attacker as usize == c) {
+                let take = (starving * f.committed / total).min(f.committed);
+                f.committed -= take;
+                returned += take;
+            }
+            self.manpower[c] += returned;
+            if self.is_human(c as u16) && returned > 1.0 {
+                self.say("YOUR TROOPS ARE STARVING - BUILD FARMS".to_string());
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------ population sim
+    /// _updatePopulation: logistic growth towards a ceiling that follows territory, cities and villages.
+    fn update_population(&mut self, dt: f32) {
+        let n = self.n;
+        let pop_r = (19.0f32).ln() / (POP_GROWTH_FULL_MONTHS * 30.0).max(1.0);
+        let years = self.game_days.max(0.0) / 365.0;
+        let long_term = (1.0 + POP_LONG_TERM_GROWTH_PER_YEAR).powf(years).min(POP_LONG_TERM_MAX_MULT);
+        for id in 1..n {
+            let cur = self.cells[id];
+            let orig = self.orig_cells[id] as f32;
+            if cur == 0 {
+                self.pop[id] = 0.0;
+                self.prev_cells[id] = 0;
+                self.live_gdp[id] = 0.0;
+                continue;
+            }
+            let base = self.pop_base[id];
+            let mut pop = self.pop[id];
+            let delta = cur as i64 - self.prev_cells[id] as i64;
+            if delta != 0 && orig > 0.0 {
+                let density = if delta > 0 { (base / orig).min(self.density_ref) } else { base / orig };
+                pop = (pop + delta as f32 * density).max(0.0);
+            }
+            self.prev_cells[id] = cur;
+            let territory = if orig > 0.0 { (cur as f32 / orig).clamp(0.0, 1.0) } else { 1.0 };
+            let expansion_density = if orig > 0.0 { (base / orig).min(self.density_ref) } else { 0.0 };
+            let acquired = (cur as f32 - orig).max(0.0) * expansion_density;
+            let density_ceiling = base * POP_PEACETIME_CAP_MULT * territory.max(POP_MIN_FRAC) + acquired * POP_PEACETIME_CAP_MULT;
+            let village_rate = self.econ.village_rate(id);
+            let village_room = (village_rate * 10.0).min(density_ceiling * VILLAGE_MAX_POP_BONUS);
+            let ceiling = (density_ceiling * long_term * self.econ.city_cap_bonus(id) + village_room).max(0.01);
+            if pop > ceiling {
+                pop = ceiling;
+            }
+            let at_war = self.fronts.iter().any(|f| !f.done && (f.attacker as usize == id || f.defender as usize == id));
+            let r_eff = pop_r * if at_war { POP_WAR_GROWTH_MULT } else { 1.0 };
+            let rdt = r_eff * dt;
+            let next = if rdt > 0.0 { pop * (1.0 + rdt) / (1.0 + rdt * pop / pop.max(ceiling)) } else { pop };
+            let village_growth = village_rate * dt / 365.0;
+            self.pop[id] = (next + village_growth).min(ceiling).max(0.01);
+            // liveStatsOf: GDP follows land and population
+            let land_scale = if orig > 0.0 { cur as f32 / orig } else { 1.0 };
+            let pop_scale = if base > 0.0 { self.pop[id] / base } else { 1.0 };
+            let raw = GROWTH_SCALE_MAX.min(land_scale.max(pop_scale).max(0.05));
+            let scale = if raw > 1.0 { raw.powf(OUTPUT_SCALE_EXP) } else { raw };
+            self.live_gdp[id] = self.gdp[id] * scale;
+        }
+    }
+
+    // ------------------------------------------------------------------ alliances + war assists
+    pub fn are_allies(&self, a: u16, b: u16) -> bool {
+        self.allies[a as usize * self.n + b as usize]
+    }
+
+    pub fn ally_offer_pending(&self, a: u16, b: u16) -> bool {
+        self.ally_offers.iter().any(|o| (o.from == a && o.to == b) || (o.from == b && o.to == a))
+    }
+
+    pub fn ally_on_cooldown(&self, a: u16, b: u16) -> bool {
+        self.ally_cd[a as usize * self.n + b as usize] > self.time
+    }
+
+    /// requestAlly: the player proposes an alliance to another nation.
+    pub fn request_ally(&mut self, player: u16, target: u16) -> bool {
+        if player == target
+            || self.eliminated[target as usize]
+            || self.is_at_war(player, target)
+            || self.are_allies(player, target)
+            || self.ally_offer_pending(player, target)
+            || self.ally_on_cooldown(player, target)
+        {
+            return false;
+        }
+        self.ally_offers.push(AllyOffer { from: player, to: target, created: self.time });
+        let msg = format!("{} PROPOSES ALLIANCE TO {}", self.names[player as usize], self.names[target as usize]);
+        self.say(msg);
+        true
+    }
+
+    fn make_allies(&mut self, a: u16, b: u16) {
+        let n = self.n;
+        self.allies[a as usize * n + b as usize] = true;
+        self.allies[b as usize * n + a as usize] = true;
+        let msg = format!("{} ALLIED WITH {}", self.names[a as usize], self.names[b as usize]);
+        self.say(msg);
+    }
+
+    /// _aiWantsAlliance
+    fn ai_wants_alliance(&self, to: u16, from: u16) -> bool {
+        let to_mp = self.manpower[to as usize];
+        let from_mp = self.manpower[from as usize].max(1.0);
+        let mp_ratio = clamp01(1.0 - to_mp / (to_mp + from_mp));
+        let pressure = mp_ratio * ALLIANCE_MP_WEIGHT + (1.0 - self.aggression[to as usize]) * 0.4;
+        pressure > ALLIANCE_ACCEPT_THRESHOLD
+    }
+
+    fn ally_pass(&mut self) {
+        let n = self.n;
+        let offers = std::mem::take(&mut self.ally_offers);
+        let mut keep: Vec<AllyOffer> = Vec::new();
+        for o in offers {
+            let (to, from) = (o.to, o.from);
+            if self.is_human(to) {
+                keep.push(o);
+                continue;
+            }
+            let reject = |s: &mut Sim| {
+                s.ally_cd[to as usize * n + from as usize] = s.time + OFFER_COOLDOWN_S;
+                s.ally_cd[from as usize * n + to as usize] = s.time + OFFER_COOLDOWN_S;
+                let msg = format!("{} REJECTED ALLIANCE", s.names[to as usize]);
+                s.say(msg);
+            };
+            if self.at_war[to as usize * n + from as usize] || self.eliminated[to as usize] {
+                reject(self);
+            } else if self.ai_wants_alliance(to, from) {
+                self.make_allies(from, to);
+            } else if self.time - o.created > ALLY_OFFER_S * 0.5 {
+                reject(self);
+            } else {
+                keep.push(o);
+            }
+        }
+        self.ally_offers = keep;
+    }
+
+    /// _offerWarAssist: when `caller` goes to war, its allies are asked to join.
+    fn offer_war_assist(&mut self, caller: u16, target: u16) {
+        let n = self.n;
+        for h in 1..n {
+            let hu = h as u16;
+            if hu == caller || hu == target || !self.allies[caller as usize * n + h] {
+                continue;
+            }
+            if self.at_war[h * n + target as usize] || self.allies[h * n + target as usize] || self.peace_lock[h * n + target as usize] > self.time || self.cells[h] == 0 || self.eliminated[h] {
+                continue;
+            }
+            if self.assists.iter().any(|a| a.helper == hu && a.target == target) {
+                continue;
+            }
+            self.assists.push(Assist { caller, helper: hu, target, created: self.time });
+            if self.is_human(hu) {
+                let msg = format!("{} ASKS YOU TO JOIN THE WAR ON {}", self.names[caller as usize], self.names[target as usize]);
+                self.say(msg);
+            }
+        }
+    }
+
+    fn join_war_internal(&mut self, helper: u16, target: u16, caller: u16) {
+        let n = self.n;
+        let (h, t) = (helper as usize, target as usize);
+        self.at_war[h * n + t] = true;
+        self.at_war[t * n + h] = true;
+        self.war_idle[h * n + t] = 0.0;
+        self.war_idle[t * n + h] = 0.0;
+        self.peace_offers.retain(|&x| x != helper && x != target);
+        let msg = format!("{} JOINS {} AGAINST {}", self.names[h], self.names[caller as usize], self.names[t]);
+        self.say(msg);
+        if !self.is_human(target) {
+            self.ai_commit(target, helper, true);
+        }
+    }
+
+    pub fn join_war(&mut self, player: u16, target: u16) -> bool {
+        let Some(pos) = self.assists.iter().position(|a| a.helper == player && a.target == target) else { return false };
+        let req = self.assists.remove(pos);
+        if !self.are_allies(player, req.caller) || !self.is_at_war(req.caller, target) || self.is_at_war(player, target) || self.are_allies(player, target) || self.war_locked(player, target) {
+            return false;
+        }
+        self.join_war_internal(player, target, req.caller);
+        true
+    }
+
+    pub fn decline_assist(&mut self, player: u16, target: u16) {
+        if let Some(pos) = self.assists.iter().position(|a| a.helper == player && a.target == target) {
+            self.assists.remove(pos);
+            let msg = format!("{} STAYS OUT OF THE WAR ON {}", self.names[player as usize], self.names[target as usize]);
+            self.say(msg);
+        }
+    }
+
+    fn assist_pass(&mut self) {
+        let reqs = std::mem::take(&mut self.assists);
+        let mut keep: Vec<Assist> = Vec::new();
+        for r in reqs {
+            let (h, c, t) = (r.helper, r.caller, r.target);
+            if !self.are_allies(h, c) || !self.is_at_war(c, t) || self.eliminated[h as usize] || self.eliminated[t as usize] {
+                continue;
+            }
+            if self.is_human(h) {
+                if self.time - r.created <= ASSIST_REQUEST_S {
+                    keep.push(r);
+                }
+                continue;
+            }
+            let h_mp = self.manpower[h as usize];
+            let t_mp = self.manpower[t as usize].max(1.0);
+            let strength = clamp01(h_mp / (h_mp + t_mp).max(1.0));
+            let chance = clamp01(ASSIST_AI_BASE + ASSIST_AI_AGGRESSION_W * self.aggression[h as usize] + ASSIST_AI_STRENGTH_W * (strength - 0.5));
+            let roll = self.rng.f();
+            if self.are_adjacent(h, t) && roll < chance && !self.is_at_war(h, t) && !self.war_locked(h, t) && !self.are_allies(h, t) {
+                self.join_war_internal(h, t, c);
+            } else {
+                let msg = format!("{} STAYS OUT OF THE WAR ON {}", self.names[h as usize], self.names[t as usize]);
+                self.say(msg);
+            }
+        }
+        self.assists = keep;
     }
 
     /// Pull the troops back from the front against `def` (the war itself stays on).
@@ -573,6 +907,8 @@ impl Sim {
             self.peace_pass(t);
         }
         self.regen(sd);
+        self.update_population(sd);
+        self.troop_food(sd);
         {
             let ctx = EconCtx {
                 names: &self.names,
@@ -581,7 +917,7 @@ impl Sim {
                 fallen: &self.capital_fallen,
                 eliminated: &self.eliminated,
                 pop: &self.pop,
-                gdp: &self.gdp,
+                gdp: &self.live_gdp,
                 bbox: &self.bbox,
             };
             self.econ.step(sd, &ctx, &world.map, self.player, self.time);
@@ -1083,6 +1419,8 @@ impl Sim {
             self.ai_commit(a as u16, b as u16, false);
             self.ai_commit(b as u16, a as u16, false);
         }
+        self.ally_pass();
+        self.assist_pass();
         self.ai_declarations();
     }
 
@@ -1146,7 +1484,7 @@ impl Sim {
                     continue; // medium difficulty: the AI never opens a war against the player
                 }
                 let key = id * n + t;
-                if self.at_war[key] || self.peace_lock[key] > self.time || self.consider_cd[key] > self.time || !self.adjacent[key] {
+                if self.at_war[key] || self.allies[key] || self.peace_lock[key] > self.time || self.consider_cd[key] > self.time || !self.adjacent[key] {
                     continue;
                 }
                 let score = clamp01(att_mp / (att_mp + self.manpower[t].max(1.0)));

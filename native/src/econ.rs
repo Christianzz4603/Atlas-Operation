@@ -1,9 +1,9 @@
 //! Economy: stockpiles, buildings, resource regions, treasury regen and AI building.
 //! Port of WarSim._regenTreasury / _buildingOutputPerYear / buildCost / upgradeCost /
-//! canPlaceBuildingAt / placeBuilding / upgradeBuilding and the _runAiEconomy family,
-//! plus World.computeResourceMap.
-//! Not ported yet: roads + road blockage, city/village (need the population sim), port,
-//! missile silo, air defense, dismantling, ideology/policy modifiers, victory points.
+//! canPlaceBuildingAt / placeBuilding / upgradeBuilding / dismantleBuilding, the _runAiEconomy
+//! family and World.computeResourceMap.
+//! Not ported yet: roads + road blockage, port, missile silo, air defense, ideology/policy
+//! modifiers (all multipliers are 1).
 use crate::mapdata::MapData;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -18,12 +18,23 @@ pub enum Res {
 pub const RES_N: usize = 6;
 pub type Stock = [f32; RES_N];
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Special {
+    None,
+    /// raises the national population ceiling
+    City,
+    /// adds population every year
+    Village,
+}
+
 const BUILDING_SIZE: i32 = 4;
 const OUTPUT_PER_LEVEL_MULT: f32 = 0.85;
 const OUTPUT_SCALE_EXP: f32 = 0.7;
 const OUTPUT_REF_POP: f32 = 20.0;
 const FARM_OUTPUT_BASE_FRAC: f32 = 0.4;
 const MAX_LEVEL: u8 = 3;
+const CITY_MAX_POP_BONUS: f32 = 0.15;
+const CITY_BONUS_HALF_LIFE_WEIGHT: f32 = 4.0;
 
 // CONFIG.treasuryRegen / civilianFood / economyCaps
 const GDP_ANNUAL_YIELD: f32 = 0.06;
@@ -51,21 +62,35 @@ pub struct Cat {
     pub blurb: &'static str,
     pub money: f32,
     pub need: &'static [(Res, f32)],
-    /// (resource, per year)
-    pub produces: (Res, f32),
+    /// (resource, per year); None for city / village (they act on population)
+    pub produces: Option<(Res, f32)>,
     pub color: [u8; 3],
-    /// index into RESOURCE_KINDS if this building gets a bonus on matching deposits
+    /// index into the resource-deposit kinds if this building gets a bonus on matching deposits
     pub spot: Option<usize>,
+    pub dismantle_s: f32,
+    pub special: Special,
 }
 
-pub static CATALOG: [Cat; 6] = [
-    Cat { kind: "farm", name: "Farm", blurb: "Grows food that feeds your people.", money: 9.0, need: &[], produces: (Res::Food, 2000.0), color: [52, 168, 83], spot: Some(0) },
-    Cat { kind: "construction", name: "Construction", blurb: "Turns food into bricks.", money: 6.0, need: &[(Res::Food, 40.0)], produces: (Res::Bricks, 240.0), color: [210, 126, 42], spot: Some(1) },
-    Cat { kind: "metalfab", name: "Metal Fabric", blurb: "Smelts bricks into steel.", money: 10.0, need: &[(Res::Bricks, 120.0)], produces: (Res::Steel, 127.5), color: [90, 120, 168], spot: Some(2) },
-    Cat { kind: "oil", name: "Oil Derrick", blurb: "Pumps oil.", money: 12.0, need: &[(Res::Bricks, 85.0), (Res::Steel, 65.0)], produces: (Res::Oil, 17.0), color: [91, 66, 119], spot: Some(3) },
-    Cat { kind: "uranium", name: "Uranium Mine", blurb: "Digs uranium.", money: 15.0, need: &[(Res::Bricks, 120.0), (Res::Steel, 90.0)], produces: (Res::Uranium, 0.85), color: [160, 192, 48], spot: Some(4) },
-    Cat { kind: "bank", name: "Bank", blurb: "Earns extra money.", money: 19.0, need: &[(Res::Bricks, 150.0), (Res::Steel, 130.0)], produces: (Res::Money, 5.1), color: [240, 180, 41], spot: None },
+pub const IDX_FARM: usize = 0;
+pub const IDX_CONSTRUCTION: usize = 1;
+pub const IDX_METALFAB: usize = 2;
+pub const IDX_BANK: usize = 5;
+pub const IDX_CITY: usize = 6;
+pub const IDX_VILLAGE: usize = 7;
+
+pub static CATALOG: [Cat; 8] = [
+    Cat { kind: "farm", name: "Farm", blurb: "Grows food that feeds your people and troops.", money: 9.0, need: &[], produces: Some((Res::Food, 2000.0)), color: [52, 168, 83], spot: Some(0), dismantle_s: 8.0, special: Special::None },
+    Cat { kind: "construction", name: "Construction", blurb: "Turns food into bricks.", money: 6.0, need: &[(Res::Food, 40.0)], produces: Some((Res::Bricks, 240.0)), color: [210, 126, 42], spot: Some(1), dismantle_s: 14.0, special: Special::None },
+    Cat { kind: "metalfab", name: "Metal Fabric", blurb: "Smelts bricks into steel.", money: 10.0, need: &[(Res::Bricks, 120.0)], produces: Some((Res::Steel, 127.5)), color: [90, 120, 168], spot: Some(2), dismantle_s: 16.0, special: Special::None },
+    Cat { kind: "oil", name: "Oil Derrick", blurb: "Pumps oil.", money: 12.0, need: &[(Res::Bricks, 85.0), (Res::Steel, 65.0)], produces: Some((Res::Oil, 17.0)), color: [91, 66, 119], spot: Some(3), dismantle_s: 12.0, special: Special::None },
+    Cat { kind: "uranium", name: "Uranium Mine", blurb: "Digs uranium.", money: 15.0, need: &[(Res::Bricks, 120.0), (Res::Steel, 90.0)], produces: Some((Res::Uranium, 0.85)), color: [160, 192, 48], spot: Some(4), dismantle_s: 15.0, special: Special::None },
+    Cat { kind: "bank", name: "Bank", blurb: "Earns extra money.", money: 19.0, need: &[(Res::Bricks, 150.0), (Res::Steel, 130.0)], produces: Some((Res::Money, 5.1)), color: [240, 180, 41], spot: None, dismantle_s: 10.0, special: Special::None },
+    Cat { kind: "city", name: "City", blurb: "Raises how many people your nation can hold.", money: 17.0, need: &[(Res::Bricks, 320.0), (Res::Food, 150.0)], produces: None, color: [200, 205, 214], spot: None, dismantle_s: 18.0, special: Special::City },
+    Cat { kind: "village", name: "Village", blurb: "Slowly adds population every year.", money: 5.0, need: &[(Res::Bricks, 55.0), (Res::Food, 30.0)], produces: None, color: [168, 140, 104], spot: None, dismantle_s: 10.0, special: Special::Village },
 ];
+
+/// Village output in millions of people per year (level 1).
+pub const VILLAGE_POP_PER_YEAR: f32 = 0.025;
 
 /// (name, weight, output multiplier, overlay alpha)
 pub const RARITY: [(&str, f32, f32, f32); 3] = [("common", 60.0, 1.15, 0.32), ("uncommon", 30.0, 1.4, 0.5), ("rare", 10.0, 1.9, 0.75)];
@@ -98,6 +123,8 @@ pub struct Building {
     pub gx: i32,
     pub gy: i32,
     pub level: u8,
+    /// sim time at which a dismantle finishes
+    pub dismantle_at: Option<f32>,
 }
 
 pub struct EconCtx<'a> {
@@ -255,9 +282,15 @@ impl Econ {
         self.buildings.iter().position(|b| b.id == id)
     }
 
+    fn level_mult(level: u8) -> f32 {
+        (1.0 + OUTPUT_PER_LEVEL_MULT).powi(level as i32 - 1)
+    }
+
+    /// Per-year output of resource buildings (incl. deposit bonus). 0 for city / village.
     pub fn output_per_year(&self, b: &Building) -> f32 {
         let cat = &CATALOG[b.kind];
-        let mut out = cat.produces.1 * (1.0 + OUTPUT_PER_LEVEL_MULT).powi(b.level as i32 - 1);
+        let Some((_, per)) = cat.produces else { return 0.0 };
+        let mut out = per * Self::level_mult(b.level);
         if let Some(k) = cat.spot {
             if let Some((rk, tier)) = self.resource_at(b.gx, b.gy) {
                 if rk == k {
@@ -266,6 +299,37 @@ impl Econ {
             }
         }
         out
+    }
+
+    /// Millions of people per year added by one village.
+    pub fn village_output(&self, b: &Building) -> f32 {
+        VILLAGE_POP_PER_YEAR * Self::level_mult(b.level)
+    }
+
+    pub fn village_rate(&self, country: usize) -> f32 {
+        self.buildings
+            .iter()
+            .filter(|b| b.country as usize == country && b.dismantle_at.is_none() && CATALOG[b.kind].special == Special::Village)
+            .map(|b| self.village_output(b))
+            .sum()
+    }
+
+    pub fn city_weight(&self, country: usize) -> f32 {
+        self.buildings
+            .iter()
+            .filter(|b| b.country as usize == country && b.dismantle_at.is_none() && CATALOG[b.kind].special == Special::City)
+            .map(|b| Self::level_mult(b.level))
+            .sum()
+    }
+
+    /// _cityPopCapBonus: multiplier on the national population ceiling.
+    pub fn city_cap_bonus(&self, country: usize) -> f32 {
+        let weight = self.city_weight(country);
+        if weight <= 0.0 {
+            return 1.0;
+        }
+        let k = std::f32::consts::LN_2 / CITY_BONUS_HALF_LIFE_WEIGHT;
+        1.0 + CITY_MAX_POP_BONUS * (1.0 - (-k * weight).exp())
     }
 
     pub fn build_cost(&self, kind: usize) -> Stock {
@@ -280,7 +344,7 @@ impl Econ {
 
     pub fn upgrade_cost(&self, b: &Building) -> Option<Stock> {
         let next = b.level + 1;
-        if next > MAX_LEVEL {
+        if next > MAX_LEVEL || b.dismantle_at.is_some() {
             return None;
         }
         let mult = if next == 2 { 1.0 } else { 2.0 };
@@ -333,7 +397,7 @@ impl Econ {
                 self.occ[y as usize * self.w + x as usize] = id;
             }
         }
-        self.buildings.push(Building { id, kind, country, gx, gy, level: 1 });
+        self.buildings.push(Building { id, kind, country, gx, gy, level: 1, dismantle_at: None });
         Ok(())
     }
 
@@ -342,7 +406,7 @@ impl Econ {
         if self.buildings[idx].country != country {
             return Err("NOT YOUR BUILDING");
         }
-        let Some(cost) = self.upgrade_cost(&self.buildings[idx]) else { return Err("ALREADY MAX LEVEL") };
+        let Some(cost) = self.upgrade_cost(&self.buildings[idx]) else { return Err("CAN'T UPGRADE") };
         if !self.can_afford(country as usize, &cost) {
             return Err("NOT ENOUGH RESOURCES");
         }
@@ -351,8 +415,22 @@ impl Econ {
         Ok(self.buildings[idx].level)
     }
 
+    /// Start taking a building down (it stops producing at once, disappears after dismantle_s).
+    pub fn dismantle(&mut self, id: u32, country: u16, now: f32) -> Result<(), &'static str> {
+        let Some(idx) = self.buildings.iter().position(|b| b.id == id) else { return Err("NO SUCH BUILDING") };
+        if self.buildings[idx].country != country {
+            return Err("NOT YOUR BUILDING");
+        }
+        if self.buildings[idx].dismantle_at.is_some() {
+            return Err("ALREADY DISMANTLING");
+        }
+        self.buildings[idx].dismantle_at = Some(now + CATALOG[self.buildings[idx].kind].dismantle_s);
+        Ok(())
+    }
+
     // ------------------------------------------------------------------ tick
     pub fn step(&mut self, dt_days: f32, ctx: &EconCtx, map: &MapData, player: Option<u16>, time: f32) {
+        self.finish_dismantles(time);
         self.regen(dt_days, ctx);
         self.own_timer += dt_days;
         if self.own_timer >= 2.0 {
@@ -360,6 +438,19 @@ impl Econ {
             self.reassign(map);
         }
         self.ai_step(time, ctx, map, player);
+    }
+
+    fn finish_dismantles(&mut self, time: f32) {
+        if !self.buildings.iter().any(|b| b.dismantle_at.map_or(false, |t| time >= t)) {
+            return;
+        }
+        let done: Vec<u32> = self.buildings.iter().filter(|b| b.dismantle_at.map_or(false, |t| time >= t)).map(|b| b.id).collect();
+        for v in self.occ.iter_mut() {
+            if done.contains(v) {
+                *v = 0;
+            }
+        }
+        self.buildings.retain(|b| !done.contains(&b.id));
     }
 
     /// Buildings follow the land: whoever owns the centre cell owns the building.
@@ -378,12 +469,16 @@ impl Econ {
         let mut fixed = vec![[0.0f32; RES_N]; n];
         let mut farm = vec![0.0f32; n];
         for b in &self.buildings {
+            if b.dismantle_at.is_some() {
+                continue;
+            }
             let cat = &CATALOG[b.kind];
+            let Some((res, _)) = cat.produces else { continue };
             let out = self.output_per_year(b);
             if cat.kind == "farm" {
                 farm[b.country as usize] += out;
             } else {
-                fixed[b.country as usize][cat.produces.0 as usize] += out;
+                fixed[b.country as usize][res as usize] += out;
             }
         }
         for c in 1..n {
@@ -398,10 +493,9 @@ impl Econ {
             let capital = if ctx.fallen[c] { CAPITAL_FALLEN_MULT } else { 1.0 };
             let mut gains = [0.0f32; RES_N];
             gains[Res::Money as usize] = annual / 365.0 * territory * capital;
-            for r in 1..RES_N {
+            for r in 0..RES_N {
                 gains[r] += fixed[c][r] / 365.0;
             }
-            gains[Res::Money as usize] += fixed[c][Res::Money as usize] / 365.0;
             gains[Res::Food as usize] += farm[c] / 365.0 * farm_scale(pop);
             let demand = if pop > OUTPUT_REF_POP { OUTPUT_REF_POP * (pop / OUTPUT_REF_POP).powf(OUTPUT_SCALE_EXP) } else { pop.max(0.0) };
             gains[Res::Food as usize] -= demand * CIVILIAN_FOOD_PER_POP;
@@ -445,18 +539,22 @@ impl Econ {
 
     fn ai_try_build(&mut self, c: usize, ctx: &EconCtx, map: &MapData) {
         let (r1, r2, r3) = (self.rng.f(), self.rng.f(), self.rng.f());
-        let mine: Vec<usize> = (0..self.buildings.len()).filter(|&i| self.buildings[i].country as usize == c).collect();
+        let mine: Vec<usize> = (0..self.buildings.len())
+            .filter(|&i| self.buildings[i].country as usize == c && self.buildings[i].dismantle_at.is_none())
+            .collect();
         let count_of = |k: usize| mine.iter().filter(|&&i| self.buildings[i].kind == k).count();
         let afford = |k: usize| self.can_afford(c, &self.build_cost(k));
         let kind = if r1 < AI_SKILL {
-            if count_of(0) == 0 {
-                0
-            } else if count_of(1) == 0 && afford(1) {
-                1
-            } else if count_of(2) == 0 && afford(2) {
-                2
+            if count_of(IDX_FARM) == 0 {
+                IDX_FARM
+            } else if count_of(IDX_CONSTRUCTION) == 0 && afford(IDX_CONSTRUCTION) {
+                IDX_CONSTRUCTION
+            } else if count_of(IDX_METALFAB) == 0 && afford(IDX_METALFAB) {
+                IDX_METALFAB
+            } else if count_of(IDX_CITY) <= count_of(IDX_BANK) {
+                IDX_CITY
             } else {
-                5
+                IDX_BANK
             }
         } else {
             let aff: Vec<usize> = (0..CATALOG.len()).filter(|&k| afford(k)).collect();

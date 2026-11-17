@@ -3,7 +3,7 @@
 use crate::camera::MapCamera;
 use crate::config::{log, Config};
 use crate::input::Input;
-use crate::econ::{Res, CATALOG, RARITY, Stock};
+use crate::econ::{Special, CATALOG, RARITY, Stock};
 use crate::sim::Sim;
 use crate::ui::*;
 use crate::world::World;
@@ -178,9 +178,10 @@ impl App {
         if app.uitest.is_some() {
             // walk through every screen and press every button
             for id in [
-                "New Game", "map0", "nation:Germany", "Deploy", "select:neighbor", "WAR", "SUPPORT", "pause", "Settings",
-                "UI+", "UI-", "Close", "Resume", "speed+", "speed+", "speed-", "zoom+", "zoom-", "STOP", "PEACE", "card-close", "BUILD", "build:farm", "place:auto", "select:building", "UPGRADE", "bcard-close", "BUILD", "build-close",
-                "pause", "Restart", "pause", "Leave match", "Settings", "Close", "New Game", "back",
+                "New Game", "map0", "nation:Germany", "Deploy", "BUILD", "build:farm", "place:auto", "select:neighbor", "WAR",
+                "SUPPORT", "pause", "Settings", "UI+", "UI-", "Close", "Resume", "speed+", "speed+", "speed-", "zoom+", "zoom-",
+                "STOP", "PEACE", "card-close", "select:other", "ALLY", "card-close", "select:building", "UPGRADE", "DISMANTLE",
+                "bcard-close", "BUILD", "build-close", "pause", "Restart", "pause", "Leave match", "Settings", "Close", "New Game", "back",
             ] {
                 app.gui.auto.push_back(id.to_string());
             }
@@ -199,6 +200,7 @@ impl App {
                 if a != b && s.are_adjacent(a as u16, b as u16) {
                     let mut pl = make_play(0, a as u16);
                     pl.sim.speed = 8.0;
+                    pl.sim.econ.stock[a][2] += 50.0; // food so the scripted war is allowed
                     let ok = pl.sim.declare_war(a as u16, b as u16);
                     let sent = pl.sim.commit_fraction(a as u16, b as u16, 0.5);
                     log(&format!("autotest: player={} vs {} declared={} sent={}", probe.name(a as u16), probe.name(b as u16), ok, sent));
@@ -539,6 +541,11 @@ impl App {
             pl.sel_building = pl.sim.econ.buildings.iter().find(|b| b.country == p).map(|b| b.id);
             pl.target = None;
         }
+        if g.auto_take("select:other") {
+            if let Some(n) = (1..pl.sim.n).find(|&b| b != pi && pl.sim.are_adjacent(p, b as u16) && !pl.sim.is_at_war(p, b as u16) && !pl.sim.are_allies(p, b as u16)) {
+                pl.target = Some(n as u16);
+            }
+        }
         if g.auto_take("select:neighbor") {
             if let Some(n) = (1..pl.sim.n).find(|&b| b != pi && pl.sim.are_adjacent(p, b as u16)) {
                 pl.target = Some(n as u16);
@@ -621,7 +628,7 @@ impl App {
         g.text_r(&date_string(pl.sim.game_days), pill.x + pill.w - 12.0 * u, pill.y + 24.0 * u, 14.0, c_dim());
         let stats = format!(
             "POP {:.1}M   TROOPS {} (+{} on front)",
-            pc.pop,
+            pl.sim.pop[pi],
             fmt_num(pl.sim.manpower[pi]),
             fmt_num(pl.sim.committed_total(p))
         );
@@ -631,7 +638,7 @@ impl App {
         // ---- resource bar (resource-bar in the HTML)
         let st = pl.sim.econ.stock[pi];
         let items: [(&str, String); 7] = [
-            ("population", format!("{:.1}M", pc.pop)),
+            ("population", format!("{:.1}M", pl.sim.pop[pi])),
             ("bricks", format!("{:.0}kt", st[1])),
             ("food", format!("{:.1}kt", st[2])),
             ("money", format!("${:.1}B", st[0])),
@@ -680,6 +687,19 @@ impl App {
                 pl.sim.make_peace(p, from);
             } else if g.button("Decline peace", Rect::new(r.x + 28.0 * u + bw, r.y + 44.0 * u, bw, 40.0 * u), "Decline", Style::Secondary, true) {
                 pl.sim.decline_offer(from);
+            }
+            below += 106.0 * u;
+        }
+        if let Some(rq) = pl.sim.assists.iter().find(|a| a.helper == p).cloned() {
+            let w = (sw - 20.0 * u).min(440.0 * u);
+            let r = Rect::new((sw - w) / 2.0, below, w, 96.0 * u);
+            g.panel(r, c_panel());
+            g.text(&format!("{} asks you to join the war on {}", pl.sim.names[rq.caller as usize], pl.sim.names[rq.target as usize]), r.x + 16.0 * u, r.y + 30.0 * u, 15.0, c_text());
+            let bw = (r.w - 44.0 * u) / 2.0;
+            if g.button("Join war", Rect::new(r.x + 16.0 * u, r.y + 44.0 * u, bw, 40.0 * u), "Join", Style::Danger, true) {
+                pl.sim.join_war(p, rq.target);
+            } else if g.button("Decline war", Rect::new(r.x + 28.0 * u + bw, r.y + 44.0 * u, bw, 40.0 * u), "Stay out", Style::Secondary, true) {
+                pl.sim.decline_assist(p, rq.target);
             }
             below += 106.0 * u;
         }
@@ -756,12 +776,16 @@ impl App {
                 ("YOUR NATION", c_accent())
             } else if pl.sim.eliminated[ti] {
                 ("ELIMINATED", c_red())
+            } else if pl.sim.are_allies(p, t) {
+                ("ALLY", c_green())
             } else if at_war {
                 ("AT WAR", c_red())
             } else if locked {
                 ("RECENT PEACE", c_dim())
             } else if !adjacent {
                 ("NOT ON YOUR BORDER", c_dim())
+            } else if !pl.sim.has_war_food(p) {
+                ("BUILD A FARM: TROOPS NEED FOOD", c_accent())
             } else {
                 ("AT PEACE", c_green())
             };
@@ -769,7 +793,7 @@ impl App {
             let mut ry = card.y + 100.0 * u;
             let rr = card.x + card.w - 16.0 * u;
             g.text("POPULATION", x0, ry, 13.0, c_dim());
-            g.text_r(&format!("{:.1}M", tc.pop), rr, ry, 16.0, c_text());
+            g.text_r(&format!("{:.1}M", pl.sim.pop[ti]), rr, ry, 16.0, c_text());
             ry += 28.0 * u;
             g.text("GDP", x0, ry, 13.0, c_dim());
             g.text_r(&fmt_money(tc.gdp), rr, ry, 16.0, c_text());
@@ -802,9 +826,20 @@ impl App {
                     if g.button("PEACE", Rect::new(x0 + 2.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "PEACE", Style::Secondary, true) {
                         pl.sim.propose_peace(p, t);
                     }
-                } else if g.button("WAR", Rect::new(x0, by, bw_all, 48.0 * u), "WAR", Style::Danger, adjacent && !locked && avail > 0.0) {
-                    if pl.sim.declare_war(p, t) {
-                        pl.sim.commit(p, t, amount);
+                } else if pl.sim.are_allies(p, t) {
+                    g.text_c("YOU ARE ALLIED", card.x + card.w / 2.0, by + 30.0 * u, 18.0, c_green());
+                } else {
+                    let half = (bw_all - 8.0 * u) / 2.0;
+                    let food_ok = pl.sim.has_war_food(p);
+                    if g.button("WAR", Rect::new(x0, by, half, 48.0 * u), "WAR", Style::Danger, adjacent && !locked && avail > 0.0 && food_ok) {
+                        if pl.sim.declare_war(p, t) {
+                            pl.sim.commit(p, t, amount);
+                        }
+                    }
+                    let pending = pl.sim.ally_offer_pending(p, t);
+                    let ally_ok = !pending && !pl.sim.ally_on_cooldown(p, t);
+                    if g.button("ALLY", Rect::new(x0 + half + 8.0 * u, by, half, 48.0 * u), if pending { "PENDING" } else { "ALLY" }, Style::Secondary, ally_ok) {
+                        pl.sim.request_ally(p, t);
                     }
                 }
             }
@@ -833,8 +868,13 @@ impl App {
                 draw_rectangle(row.x + 12.0 * u, row.y + 12.0 * u, 34.0 * u, 34.0 * u, col(cat.color[0], cat.color[1], cat.color[2]));
                 g.text(cat.name, row.x + 58.0 * u, row.y + 26.0 * u, 18.0, if ok { c_text() } else { c_faint() });
                 g.text(&fmt_cost(&cost), row.x + 58.0 * u, row.y + 48.0 * u, 13.0, if ok { c_accent() } else { c_red() });
-                let unit = &RES_UNIT[cat.produces.0 as usize];
-                g.text_r(&format!("+{:.1} {}/yr", cat.produces.1, unit), row.x + row.w - 12.0 * u, row.y + 26.0 * u, 13.0, c_dim());
+                let prod = match (cat.special, cat.produces) {
+                    (Special::City, _) => "raises pop cap".to_string(),
+                    (Special::Village, _) => format!("+{:.3}M pop/yr", crate::econ::VILLAGE_POP_PER_YEAR),
+                    (_, Some((r, per))) => format!("+{:.1} {}/yr", per, RES_UNIT[r as usize]),
+                    _ => String::new(),
+                };
+                g.text_r(&prod, row.x + row.w - 12.0 * u, row.y + 26.0 * u, 13.0, c_dim());
                 if g.tapped(&format!("build:{}", cat.kind), row) && ok {
                     pl.placing = Some(i);
                     pl.build_open = false;
@@ -861,9 +901,14 @@ impl App {
                     close_bcard = true;
                 }
                 g.text(&format!("Owner: {}", pl.sim.names[b.country as usize]), x0, card.y + 70.0 * u, 13.0, c_dim());
-                let out = pl.sim.econ.output_per_year(&b);
+                let out_txt = match (cat.special, cat.produces) {
+                    (Special::City, _) => format!("+{:.0}% pop cap", (pl.sim.econ.city_cap_bonus(b.country as usize) - 1.0) * 100.0),
+                    (Special::Village, _) => format!("+{:.3}M pop/yr", pl.sim.econ.village_output(&b)),
+                    (_, Some((r, _))) => format!("+{:.1} {}/yr", pl.sim.econ.output_per_year(&b), RES_UNIT[r as usize]),
+                    _ => String::new(),
+                };
                 g.text("OUTPUT", x0, card.y + 100.0 * u, 13.0, c_dim());
-                g.text_r(&format!("+{:.1} {}/yr", out, RES_UNIT[cat.produces.0 as usize]), card.x + card.w - 16.0 * u, card.y + 100.0 * u, 15.0, c_text());
+                g.text_r(&out_txt, card.x + card.w - 16.0 * u, card.y + 100.0 * u, 15.0, c_text());
                 let spot = match (cat.spot, pl.sim.econ.resource_at(b.gx, b.gy)) {
                     (Some(k), Some((rk, tier))) if rk == k => format!("On a {} deposit (x{:.2})", RARITY[tier.min(2)].0, RARITY[tier.min(2)].2),
                     (Some(_), _) => "No matching deposit here".to_string(),
@@ -872,19 +917,32 @@ impl App {
                 g.text(&spot, x0, card.y + 128.0 * u, 13.0, c_accent());
                 if b.country == p {
                     let by = card.y + card.h - 14.0 * u - 48.0 * u;
-                    match pl.sim.econ.upgrade_cost(&b) {
-                        Some(uc) => {
-                            g.text(&format!("Upgrade: {}", fmt_cost(&uc)), x0, by - 10.0 * u, 13.0, c_dim());
-                            let can = pl.sim.econ.can_afford(pi, &uc);
-                            if g.button("UPGRADE", Rect::new(x0, by, card.w - 32.0 * u, 48.0 * u), "UPGRADE", Style::Primary, can) {
-                                let msg = match pl.sim.econ.upgrade(b.id, p) {
-                                    Ok(l) => format!("{} UPGRADED {} TO LVL {}", pl.sim.names[pi], cat.kind.to_uppercase(), l),
-                                    Err(e) => e.to_string(),
-                                };
-                                pl.sim.say(msg);
+                    if let Some(t) = b.dismantle_at {
+                        g.text(&format!("DISMANTLING... {:.0}s", (t - pl.sim.time).max(0.0)), x0, by + 30.0 * u, 18.0, c_red());
+                    } else {
+                        let half = (card.w - 32.0 * u - 8.0 * u) / 2.0;
+                        match pl.sim.econ.upgrade_cost(&b) {
+                            Some(uc) => {
+                                g.text(&format!("Upgrade: {}", fmt_cost(&uc)), x0, by - 10.0 * u, 13.0, c_dim());
+                                let can = pl.sim.econ.can_afford(pi, &uc);
+                                if g.button("UPGRADE", Rect::new(x0, by, half, 48.0 * u), "UPGRADE", Style::Primary, can) {
+                                    let msg = match pl.sim.econ.upgrade(b.id, p) {
+                                        Ok(l) => format!("{} UPGRADED {} TO LVL {}", pl.sim.names[pi], cat.kind.to_uppercase(), l),
+                                        Err(e) => e.to_string(),
+                                    };
+                                    pl.sim.say(msg);
+                                }
                             }
+                            None => g.text("MAX LEVEL", x0, by + 30.0 * u, 18.0, c_accent()),
                         }
-                        None => g.text("MAX LEVEL", x0, by + 30.0 * u, 18.0, c_accent()),
+                        if g.button("DISMANTLE", Rect::new(x0 + half + 8.0 * u, by, half, 48.0 * u), "DISMANTLE", Style::Danger, true) {
+                            let now = pl.sim.time;
+                            let msg = match pl.sim.econ.dismantle(b.id, p, now) {
+                                Ok(()) => format!("{} DISMANTLES {}", pl.sim.names[pi], cat.kind.to_uppercase()),
+                                Err(e) => e.to_string(),
+                            };
+                            pl.sim.say(msg);
+                        }
                     }
                 }
             } else {
