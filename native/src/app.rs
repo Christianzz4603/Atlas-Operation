@@ -3,8 +3,8 @@
 use crate::camera::MapCamera;
 use crate::config::{log, Config};
 use crate::input::Input;
-use crate::econ::{Special, CATALOG, RARITY, Stock};
-use crate::sim::Sim;
+use crate::econ::{Special, CATALOG, IDX_AIRDEF, RARITY, Stock};
+use crate::sim::{air_defense_range, flight_pos, Sim};
 use crate::ui::*;
 use crate::world::World;
 use macroquad::prelude::*;
@@ -107,6 +107,11 @@ fn landing_cell(w: &World, def: u16, cx: i32, cy: i32, scale: f32) -> Option<usi
     best
 }
 
+fn any_cell_of(w: &World, def: u16) -> Option<usize> {
+    let m = &w.map;
+    (0..m.owner.len()).find(|&i| m.owner[i] == def && m.land[i] == 1)
+}
+
 fn any_coastal_cell(w: &World, def: u16) -> Option<usize> {
     let m = &w.map;
     (0..m.owner.len()).find(|&i| m.owner[i] == def && m.land[i] == 1 && is_coastal(w, i))
@@ -153,6 +158,8 @@ struct Play {
     naval_mode: bool,
     naval_cell: Option<usize>,
     naval_boats: u32,
+    missile_mode: bool,
+    missile_target: Option<(i32, i32)>,
     build_open: bool,
     placing: Option<usize>,
     sel_building: Option<u32>,
@@ -165,7 +172,7 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     let mut sim = Sim::new(&world, seed);
     if std::env::var("ATLAS_UITEST").is_ok() {
         // the scripted UI test needs spare materials for ports etc.
-        sim.econ.stock[nation as usize] = [100.0, 500.0, 100.0, 500.0, 50.0, 5.0];
+        sim.econ.stock[nation as usize] = [200.0, 700.0, 100.0, 700.0, 50.0, 5.0];
     }
     sim.player = Some(nation);
     sim.paused = false;
@@ -174,7 +181,7 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     sim.econ.fill_overlay(&mut img.bytes);
     let overlay = Texture2D::from_image(&img);
     overlay.set_filter(FilterMode::Nearest);
-    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, build_open: false, placing: None, sel_building: None, overlay }
+    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, missile_mode: false, missile_target: None, build_open: false, placing: None, sel_building: None, overlay }
 }
 
 pub struct App {
@@ -227,7 +234,7 @@ impl App {
             // walk through every screen and press every button
             for id in [
                 "New Game", "map0", "nation:Germany", "Deploy", "BUILD", "build:farm", "place:auto", "BUILD", "build:port", "place:coast",
-                "select:neighbor", "WAR", "NAVAL", "naval:tap", "SEND", "SUPPORT", "pause", "Settings", "UI+", "UI-", "Close", "Resume",
+                "select:neighbor", "WAR", "NAVAL", "naval:tap", "SEND", "BUILD", "build:missile-silo", "place:auto", "BUILD", "build:air-defense", "place:auto", "MISSILE", "missile:tap", "LAUNCH", "SUPPORT", "pause", "Settings", "UI+", "UI-", "Close", "Resume",
                 "speed+", "speed+", "speed-", "zoom+", "zoom-", "STOP", "PEACE", "card-close", "select:other", "ALLY", "card-close",
                 "select:building", "UPGRADE", "DISMANTLE", "bcard-close", "BUILD", "build-close", "pause", "Restart", "pause",
                 "Leave match", "Settings", "Close", "New Game", "back",
@@ -604,6 +611,14 @@ impl App {
                 }
             }
         }
+        if g.auto_take("missile:tap") {
+            if let Some(t) = pl.target {
+                if let Some(c) = any_cell_of(&pl.world, t) {
+                    let mw = pl.world.map.w;
+                    pl.missile_target = Some(((c % mw) as i32, (c / mw) as i32));
+                }
+            }
+        }
         if g.auto_take("naval:tap") {
             if let Some(t) = pl.target {
                 if let Some(c) = any_coastal_cell(&pl.world, t) {
@@ -681,6 +696,81 @@ impl App {
                     draw_rectangle(bx - bs * 0.6 - 1.5, by - bs * 0.35 - 1.5, bs * 1.2 + 3.0, bs * 0.7 + 3.0, Color::new(0.04, 0.06, 0.09, 0.95));
                     draw_rectangle(bx - bs * 0.6, by - bs * 0.35, bs * 1.2, bs * 0.7, col(ac[0], ac[1], ac[2]));
                     draw_triangle(vec2(bx + bs * 0.6, by - bs * 0.35), vec2(bx + bs * 0.6, by + bs * 0.35), vec2(bx + bs * 1.0, by), col(ac[0], ac[1], ac[2]));
+                }
+            }
+        }
+
+        {
+            let now = pl.sim.time;
+            let cam = &pl.cam;
+            let to_px = |x: f32, y: f32| (cam.offset.x + x * cam.scale, cam.offset.y + y * cam.scale);
+            let sc = cam.scale.max(0.6);
+            for s in &pl.sim.sites {
+                let age = now - s.impact_at;
+                if (0.0..3.0).contains(&age) {
+                    let (px, py) = to_px(s.x, s.y);
+                    let t = (age / 3.0).clamp(0.0, 1.0);
+                    let rr = s.radius as f32 * cam.scale;
+                    draw_circle(px, py, rr * (0.3 + 0.7 * (t * 2.0).min(1.0)), Color::new(1.0, 0.65, 0.2, 0.55 * (1.0 - t)));
+                    draw_circle(px, py, rr * 0.45 * (1.0 - t), Color::new(1.0, 1.0, 0.9, 0.8 * (1.0 - t)));
+                    draw_circle_lines(px, py, rr * (0.4 + 0.8 * t), 2.0, Color::new(1.0, 0.9, 0.6, 0.8 * (1.0 - t)));
+                }
+            }
+            for f in &pl.sim.flights {
+                if let Some(t) = f.intercepted_at {
+                    let k = ((now - t) / 2.0).clamp(0.0, 1.0);
+                    let (px, py) = to_px(f.ix, f.iy);
+                    draw_circle(px, py, (6.0 + 22.0 * k) * sc, Color::new(1.0, 0.85, 0.4, 0.7 * (1.0 - k)));
+                } else if now < f.start_at {
+                    let (px, py) = to_px(f.sx, f.sy);
+                    let pulse = 0.5 + 0.5 * (now * 8.0).sin();
+                    draw_circle(px, py, (5.0 + 4.0 * pulse) * sc, Color::new(1.0, 0.3, 0.2, 0.55));
+                } else if !f.impact_done {
+                    for k in 0..6 {
+                        let (x0, y0) = flight_pos(f, now - k as f32 * 0.3);
+                        let (x1, y1) = flight_pos(f, now - (k as f32 + 1.0) * 0.3);
+                        let (ax, ay) = to_px(x0, y0);
+                        let (bx, by) = to_px(x1, y1);
+                        draw_line(ax, ay, bx, by, (3.0 - k as f32 * 0.4).max(1.0), Color::new(1.0, 0.9, 0.8, 0.8 - k as f32 * 0.13));
+                    }
+                    let (x, y) = flight_pos(f, now);
+                    let (hx, hy) = to_px(x, y);
+                    draw_circle(hx, hy, 5.0, Color::new(1.0, 0.5, 0.15, 0.6));
+                    draw_circle(hx, hy, 2.8, WHITE);
+                }
+            }
+            for it in &pl.sim.interceptors {
+                match it.resolved {
+                    None => {
+                        let t = ((now - it.start_at) / (it.arrive_at - it.start_at).max(0.01)).clamp(0.0, 1.0);
+                        let (x0, y0) = to_px(it.sx, it.sy);
+                        let (x1, y1) = to_px(it.sx + (it.ax - it.sx) * t, it.sy + (it.ay - it.sy) * t);
+                        draw_line(x0, y0, x1, y1, 1.5, Color::new(0.5, 0.95, 1.0, 0.7));
+                        draw_circle(x1, y1, 3.0, Color::new(0.7, 1.0, 1.0, 1.0));
+                    }
+                    Some(true) => {
+                        let k = (now - it.resolved_at).clamp(0.0, 1.0);
+                        let (px, py) = to_px(it.ax, it.ay);
+                        draw_circle(px, py, (5.0 + 16.0 * k) * sc, Color::new(0.6, 1.0, 1.0, 0.7 * (1.0 - k)));
+                    }
+                    Some(false) => {
+                        let k = (now - it.resolved_at).clamp(0.0, 1.0);
+                        let (px, py) = to_px(it.ax, it.ay);
+                        draw_circle(px, py, (3.0 + 6.0 * k) * sc, Color::new(0.7, 0.7, 0.7, 0.4 * (1.0 - k)));
+                    }
+                }
+            }
+            if pl.missile_mode {
+                if let Some((tx, ty)) = pl.missile_target {
+                    let (px, py) = to_px(tx as f32 + 0.5, ty as f32 + 0.5);
+                    draw_circle_lines(px, py, 17.0 * cam.scale, 2.5, Color::new(1.0, 0.25, 0.2, 0.9));
+                    draw_circle(px, py, 3.0, Color::new(1.0, 0.25, 0.2, 1.0));
+                }
+            }
+            if let Some(bid) = pl.sel_building {
+                if let Some(b) = pl.sim.econ.buildings.iter().find(|b| b.id == bid && b.kind == IDX_AIRDEF) {
+                    let (px, py) = to_px(b.gx as f32 + 2.0, b.gy as f32 + 2.0);
+                    draw_circle_lines(px, py, air_defense_range(b.level) * cam.scale, 2.0, Color::new(0.4, 0.9, 1.0, 0.8));
                 }
             }
         }
@@ -838,7 +928,12 @@ impl App {
         let track = Rect::new(sl.x + 22.0 * u, sl.y + 46.0 * u, sl.w - 44.0 * u, 11.0 * u);
         g.slider(track, &mut pl.send_frac, &mut pl.slider_drag, avail > 0.0);
 
-        // ---- BUILD button
+        // ---- BUILD / MISSILE buttons
+        let has_silo = !pl.sim.econ.silos_of(p).is_empty();
+        let has_silo_f = if has_silo { 1.0f32 } else { 0.0 };
+        if !has_silo {
+            pl.missile_mode = false;
+        }
         let build_btn = if portrait {
             Rect::new(m, sl.y - m - 54.0 * u, sw - 2.0 * m, 54.0 * u)
         } else {
@@ -849,14 +944,27 @@ impl App {
             pl.target = None;
             pl.sel_building = None;
         }
+        if has_silo && pl.placing.is_none() {
+            let mrect = if portrait {
+                Rect::new(m, build_btn.y - m - 54.0 * u, sw - 2.0 * m, 54.0 * u)
+            } else {
+                Rect::new(build_btn.x - m - 120.0 * u, sl.y, 120.0 * u, sl_h)
+            };
+            if g.button("MISSILE", mrect, "MISSILE", Style::Danger, true) {
+                pl.missile_mode = true;
+                pl.missile_target = None;
+                pl.build_open = false;
+                pl.naval_mode = false;
+            }
+        }
 
         // ---- country card (bottom-left)
         let mut close_card = false;
         if let (Some(t), false) = (pl.target, pl.build_open) {
             let ti = t as usize;
-            let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 128.0 * u - 4.0 * m).clamp(240.0 * u, 380.0 * u) };
+            let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 258.0 * u - 5.0 * m).clamp(240.0 * u, 380.0 * u) };
             let chh = 296.0 * u;
-            let cy = if portrait { sl.y - m - 54.0 * u - m - chh } else { sh - m - chh };
+            let cy = if portrait { sl.y - (54.0 * u + m) * (1.0 + has_silo_f) - m - chh } else { sh - m - chh };
             let card = Rect::new(m, cy, cw, chh);
             g.panel(card, c_panel());
             let tc = &pl.world.map.countries[ti];
@@ -951,6 +1059,46 @@ impl App {
             pl.target = None;
         }
 
+        // ---- missile targeting banner
+        if pl.missile_mode {
+            let ready = pl.sim.econ.silos_of(p).iter().map(|&i| pl.sim.econ.buildings[i].id).find(|&id| pl.sim.silo_cooldown_left(id) <= 0.0);
+            let w = (sw - 2.0 * m).min(560.0 * u);
+            let r = Rect::new((sw - w) / 2.0, below, w, 100.0 * u);
+            g.panel(r, c_panel());
+            let status = match (ready, pl.missile_target) {
+                (None, _) => "silo reloading...".to_string(),
+                (Some(_), None) => "tap a target on the map".to_string(),
+                (Some(_), Some(_)) => "target locked".to_string(),
+            };
+            g.text(&format!("Missile strike: {}", status), r.x + 16.0 * u, r.y + 30.0 * u, 16.0, c_text());
+            g.text(
+                &format!("Cost ${:.0}B, {:.0}kt oil, {:.1}kt uranium", crate::sim::MISSILE_COST_MONEY, crate::sim::MISSILE_COST_OIL, crate::sim::MISSILE_COST_URANIUM),
+                r.x + 16.0 * u,
+                r.y + 54.0 * u,
+                13.0,
+                c_accent(),
+            );
+            g.text("5s warm-up, then the missile flies. Air defense can shoot it down.", r.x + 16.0 * u, r.y + 80.0 * u, 12.0, c_dim());
+            let can = ready.is_some() && pl.missile_target.is_some() && pl.sim.can_afford_missile(p);
+            let bw = 118.0 * u;
+            if g.button("LAUNCH", Rect::new(r.x + r.w - 14.0 * u - bw, r.y + 8.0 * u, bw, 40.0 * u), "LAUNCH", Style::Danger, can) {
+                if let (Some(sid), Some((tx, ty))) = (ready, pl.missile_target) {
+                    match pl.sim.launch_missile(p, sid, tx, ty, &pl.world) {
+                        Ok(()) => {
+                            pl.missile_mode = false;
+                            pl.missile_target = None;
+                        }
+                        Err(e) => pl.sim.say(e.to_string()),
+                    }
+                }
+            }
+            if g.button("missile-cancel", Rect::new(r.x + r.w - 14.0 * u - bw, r.y + 52.0 * u, bw, 40.0 * u), "Cancel", Style::Secondary, true) {
+                pl.missile_mode = false;
+                pl.missile_target = None;
+            }
+            below += 110.0 * u;
+        }
+
         // ---- naval targeting banner + invasion panel
         if pl.naval_mode {
             if let Some(t) = pl.target {
@@ -997,7 +1145,7 @@ impl App {
         // ---- build panel
         if pl.build_open && pl.placing.is_none() {
             let w = (sw - 2.0 * m).min(560.0 * u);
-            let row_h = 60.0 * u;
+            let row_h = 50.0 * u;
             let h = 64.0 * u + CATALOG.len() as f32 * row_h + 8.0 * u;
             let r = Rect::new((sw - w) / 2.0, (sh - h - m).max(m), w, h);
             g.panel(r, c_panel());
@@ -1011,16 +1159,21 @@ impl App {
                 let ok = pl.sim.econ.can_afford(pi, &cost);
                 let row = Rect::new(r.x + 10.0 * u, ry, r.w - 20.0 * u, row_h - 6.0 * u);
                 g.rrect(row.x, row.y, row.w, row.h, 10.0 * u, if ok { c_panel2() } else { col(24, 30, 38) });
-                draw_rectangle(row.x + 12.0 * u, row.y + 12.0 * u, 34.0 * u, 34.0 * u, col(cat.color[0], cat.color[1], cat.color[2]));
-                g.text(cat.name, row.x + 58.0 * u, row.y + 26.0 * u, 18.0, if ok { c_text() } else { c_faint() });
-                g.text(&fmt_cost(&cost), row.x + 58.0 * u, row.y + 48.0 * u, 13.0, if ok { c_accent() } else { c_red() });
+                draw_rectangle(row.x + 10.0 * u, row.y + 8.0 * u, 28.0 * u, 28.0 * u, col(cat.color[0], cat.color[1], cat.color[2]));
+                g.text(cat.name, row.x + 48.0 * u, row.y + 19.0 * u, 16.0, if ok { c_text() } else { c_faint() });
+                g.text(&fmt_cost(&cost), row.x + 48.0 * u, row.y + 37.0 * u, 12.0, if ok { c_accent() } else { c_red() });
                 let prod = match (cat.special, cat.produces) {
                     (Special::City, _) => "raises pop cap".to_string(),
                     (Special::Village, _) => format!("+{:.3}M pop/yr", crate::econ::VILLAGE_POP_PER_YEAR),
                     (_, Some((r, per))) => format!("+{:.1} {}/yr", per, RES_UNIT[r as usize]),
-                    _ => String::new(),
+                    _ => match cat.kind {
+                        "missile-silo" => "launches missiles".to_string(),
+                        "air-defense" => "intercepts missiles".to_string(),
+                        "port" => "sea invasions".to_string(),
+                        _ => String::new(),
+                    },
                 };
-                g.text_r(&prod, row.x + row.w - 12.0 * u, row.y + 26.0 * u, 13.0, c_dim());
+                g.text_r(&prod, row.x + row.w - 12.0 * u, row.y + 19.0 * u, 12.0, c_dim());
                 if g.tapped(&format!("build:{}", cat.kind), row) && ok {
                     pl.placing = Some(i);
                     pl.build_open = false;
@@ -1035,9 +1188,9 @@ impl App {
             if let Some(bi) = pl.sim.econ.buildings.iter().position(|b| b.id == bid) {
                 let b = pl.sim.econ.buildings[bi].clone();
                 let cat = &CATALOG[b.kind];
-                let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 128.0 * u - 4.0 * m).clamp(240.0 * u, 380.0 * u) };
+                let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 258.0 * u - 5.0 * m).clamp(240.0 * u, 380.0 * u) };
                 let chh = 250.0 * u;
-                let cy = if portrait { sl.y - m - 54.0 * u - m - chh } else { sh - m - chh };
+                let cy = if portrait { sl.y - (54.0 * u + m) * (1.0 + has_silo_f) - m - chh } else { sh - m - chh };
                 let card = Rect::new(m, cy, cw, chh);
                 g.panel(card, c_panel());
                 let x0 = card.x + 16.0 * u;
@@ -1051,7 +1204,12 @@ impl App {
                     (Special::City, _) => format!("+{:.0}% pop cap", (pl.sim.econ.city_cap_bonus(b.country as usize) - 1.0) * 100.0),
                     (Special::Village, _) => format!("+{:.3}M pop/yr", pl.sim.econ.village_output(&b)),
                     (_, Some((r, _))) => format!("+{:.1} {}/yr", pl.sim.econ.output_per_year(&b), RES_UNIT[r as usize]),
-                    _ => String::new(),
+                    _ => match cat.kind {
+                        "missile-silo" => "launches missiles".to_string(),
+                        "air-defense" => "intercepts missiles".to_string(),
+                        "port" => "sea invasions".to_string(),
+                        _ => String::new(),
+                    },
                 };
                 g.text("OUTPUT", x0, card.y + 100.0 * u, 13.0, c_dim());
                 g.text_r(&out_txt, card.x + card.w - 16.0 * u, card.y + 100.0 * u, 15.0, c_text());
@@ -1102,7 +1260,12 @@ impl App {
         // ---- tap on the map selects a country
         if !modal && g.ptr.tapped() && !g.consumed && !g.over_ui(g.ptr.press_pos) {
             let (cx, cy) = pl.cam.screen_to_cell(g.ptr.pos);
-            if pl.naval_mode {
+            if pl.missile_mode {
+                let (mw, mh) = (pl.world.map.w as i32, pl.world.map.h as i32);
+                if cx >= 0 && cy >= 0 && cx < mw && cy < mh && pl.world.map.land[(cy * mw + cx) as usize] == 1 {
+                    pl.missile_target = Some((cx, cy));
+                }
+            } else if pl.naval_mode {
                 if let Some(t) = pl.target {
                     match landing_cell(&pl.world, t, cx, cy, pl.cam.scale) {
                         Some(c) => {
