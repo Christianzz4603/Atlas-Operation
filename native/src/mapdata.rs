@@ -34,6 +34,8 @@ pub struct MapData {
     pub owner: Vec<u16>,
     pub outline: Vec<u8>,
     pub inner: Vec<u8>,
+    /// scorched cells (0 = clean); filled by missile strikes, heals over time
+    pub crater: Vec<u8>,
 }
 
 struct Reader<'a> {
@@ -106,6 +108,6 @@ impl MapData {
             .collect();
         let outline = r.take(n)?.to_vec();
         let inner = r.take(n)?.to_vec();
-        Ok(MapData { w, h, crop, countries, capitals, land, owner, outline, inner })
+        Ok(MapData { w, h, crop, countries, capitals, land, owner, outline, inner, crater: vec![0u8; n] })
     }
 }

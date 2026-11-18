@@ -71,6 +71,7 @@ pub struct Cat {
     pub special: Special,
     /// must touch water (ports)
     pub coastal: bool,
+    pub max_level: u8,
 }
 
 pub const IDX_FARM: usize = 0;
@@ -80,18 +81,22 @@ pub const IDX_BANK: usize = 5;
 pub const IDX_CITY: usize = 6;
 pub const IDX_VILLAGE: usize = 7;
 pub const IDX_PORT: usize = 8;
+pub const IDX_SILO: usize = 9;
+pub const IDX_AIRDEF: usize = 10;
 const PORT_WATER_REACH: i32 = 2;
 
-pub static CATALOG: [Cat; 9] = [
-    Cat { kind: "farm", name: "Farm", blurb: "Grows food that feeds your people and troops.", money: 9.0, need: &[], produces: Some((Res::Food, 2000.0)), color: [52, 168, 83], spot: Some(0), dismantle_s: 8.0, special: Special::None, coastal: false },
-    Cat { kind: "construction", name: "Construction", blurb: "Turns food into bricks.", money: 6.0, need: &[(Res::Food, 40.0)], produces: Some((Res::Bricks, 240.0)), color: [210, 126, 42], spot: Some(1), dismantle_s: 14.0, special: Special::None, coastal: false },
-    Cat { kind: "metalfab", name: "Metal Fabric", blurb: "Smelts bricks into steel.", money: 10.0, need: &[(Res::Bricks, 120.0)], produces: Some((Res::Steel, 127.5)), color: [90, 120, 168], spot: Some(2), dismantle_s: 16.0, special: Special::None, coastal: false },
-    Cat { kind: "oil", name: "Oil Derrick", blurb: "Pumps oil.", money: 12.0, need: &[(Res::Bricks, 85.0), (Res::Steel, 65.0)], produces: Some((Res::Oil, 17.0)), color: [91, 66, 119], spot: Some(3), dismantle_s: 12.0, special: Special::None, coastal: false },
-    Cat { kind: "uranium", name: "Uranium Mine", blurb: "Digs uranium.", money: 15.0, need: &[(Res::Bricks, 120.0), (Res::Steel, 90.0)], produces: Some((Res::Uranium, 0.85)), color: [160, 192, 48], spot: Some(4), dismantle_s: 15.0, special: Special::None, coastal: false },
-    Cat { kind: "bank", name: "Bank", blurb: "Earns extra money.", money: 19.0, need: &[(Res::Bricks, 150.0), (Res::Steel, 130.0)], produces: Some((Res::Money, 5.1)), color: [240, 180, 41], spot: None, dismantle_s: 10.0, special: Special::None, coastal: false },
-    Cat { kind: "city", name: "City", blurb: "Raises how many people your nation can hold.", money: 17.0, need: &[(Res::Bricks, 320.0), (Res::Food, 150.0)], produces: None, color: [200, 205, 214], spot: None, dismantle_s: 18.0, special: Special::City, coastal: false },
-    Cat { kind: "village", name: "Village", blurb: "Slowly adds population every year.", money: 5.0, need: &[(Res::Bricks, 55.0), (Res::Food, 30.0)], produces: None, color: [168, 140, 104], spot: None, dismantle_s: 10.0, special: Special::Village, coastal: false },
-    Cat { kind: "port", name: "Port", blurb: "Lets your troops invade by sea. Must be on the coast.", money: 11.0, need: &[(Res::Bricks, 90.0), (Res::Steel, 70.0)], produces: None, color: [70, 150, 200], spot: None, dismantle_s: 12.0, special: Special::None, coastal: true },
+pub static CATALOG: [Cat; 11] = [
+    Cat { kind: "farm", name: "Farm", blurb: "Grows food that feeds your people and troops.", money: 9.0, need: &[], produces: Some((Res::Food, 2000.0)), color: [52, 168, 83], spot: Some(0), dismantle_s: 8.0, special: Special::None, coastal: false, max_level: 3 },
+    Cat { kind: "construction", name: "Construction", blurb: "Turns food into bricks.", money: 6.0, need: &[(Res::Food, 40.0)], produces: Some((Res::Bricks, 240.0)), color: [210, 126, 42], spot: Some(1), dismantle_s: 14.0, special: Special::None, coastal: false, max_level: 3 },
+    Cat { kind: "metalfab", name: "Metal Fabric", blurb: "Smelts bricks into steel.", money: 10.0, need: &[(Res::Bricks, 120.0)], produces: Some((Res::Steel, 127.5)), color: [90, 120, 168], spot: Some(2), dismantle_s: 16.0, special: Special::None, coastal: false, max_level: 3 },
+    Cat { kind: "oil", name: "Oil Derrick", blurb: "Pumps oil.", money: 12.0, need: &[(Res::Bricks, 85.0), (Res::Steel, 65.0)], produces: Some((Res::Oil, 17.0)), color: [91, 66, 119], spot: Some(3), dismantle_s: 12.0, special: Special::None, coastal: false, max_level: 3 },
+    Cat { kind: "uranium", name: "Uranium Mine", blurb: "Digs uranium.", money: 15.0, need: &[(Res::Bricks, 120.0), (Res::Steel, 90.0)], produces: Some((Res::Uranium, 0.85)), color: [160, 192, 48], spot: Some(4), dismantle_s: 15.0, special: Special::None, coastal: false, max_level: 3 },
+    Cat { kind: "bank", name: "Bank", blurb: "Earns extra money.", money: 19.0, need: &[(Res::Bricks, 150.0), (Res::Steel, 130.0)], produces: Some((Res::Money, 5.1)), color: [240, 180, 41], spot: None, dismantle_s: 10.0, special: Special::None, coastal: false, max_level: 3 },
+    Cat { kind: "city", name: "City", blurb: "Raises how many people your nation can hold.", money: 17.0, need: &[(Res::Bricks, 320.0), (Res::Food, 150.0)], produces: None, color: [200, 205, 214], spot: None, dismantle_s: 18.0, special: Special::City, coastal: false, max_level: 3 },
+    Cat { kind: "village", name: "Village", blurb: "Slowly adds population every year.", money: 5.0, need: &[(Res::Bricks, 55.0), (Res::Food, 30.0)], produces: None, color: [168, 140, 104], spot: None, dismantle_s: 10.0, special: Special::Village, coastal: false, max_level: 3 },
+    Cat { kind: "port", name: "Port", blurb: "Lets your troops invade by sea. Must be on the coast.", money: 11.0, need: &[(Res::Bricks, 90.0), (Res::Steel, 70.0)], produces: None, color: [70, 150, 200], spot: None, dismantle_s: 12.0, special: Special::None, coastal: true, max_level: 3 },
+    Cat { kind: "missile-silo", name: "Missile Silo", blurb: "Launches long-range missiles. Needs oil and uranium per shot.", money: 30.0, need: &[(Res::Bricks, 170.0), (Res::Steel, 210.0)], produces: None, color: [190, 70, 70], spot: None, dismantle_s: 18.0, special: Special::None, coastal: false, max_level: 1 },
+    Cat { kind: "air-defense", name: "Air Defense", blurb: "Shoots down incoming missiles over your land.", money: 18.0, need: &[(Res::Bricks, 130.0), (Res::Steel, 160.0)], produces: None, color: [60, 165, 175], spot: None, dismantle_s: 14.0, special: Special::None, coastal: false, max_level: 3 },
 ];
 
 /// Village output in millions of people per year (level 1).
@@ -349,7 +354,7 @@ impl Econ {
 
     pub fn upgrade_cost(&self, b: &Building) -> Option<Stock> {
         let next = b.level + 1;
-        if next > MAX_LEVEL || b.dismantle_at.is_some() {
+        if next > CATALOG[b.kind].max_level.min(MAX_LEVEL) || b.dismantle_at.is_some() {
             return None;
         }
         let mult = if next == 2 { 1.0 } else { 2.0 };
@@ -427,7 +432,7 @@ impl Econ {
         for y in gy..gy + BUILDING_SIZE {
             for x in gx..gx + BUILDING_SIZE {
                 let i = y as usize * self.w + x as usize;
-                if map.land[i] != 1 || map.owner[i] != country || self.occ[i] != 0 {
+                if map.land[i] != 1 || map.owner[i] != country || self.occ[i] != 0 || map.crater[i] != 0 {
                     return false;
                 }
             }
@@ -620,7 +625,7 @@ impl Econ {
                 IDX_BANK
             }
         } else {
-            let aff: Vec<usize> = (0..CATALOG.len()).filter(|&k| afford(k)).collect();
+            let aff: Vec<usize> = (0..CATALOG.len()).filter(|&k| k != IDX_SILO && k != IDX_AIRDEF && afford(k)).collect();
             if aff.is_empty() {
                 return;
             }
@@ -691,6 +696,33 @@ impl Econ {
             }
         }
         fallback
+    }
+
+    /// Remove buildings (destroyed by a missile strike).
+    pub fn remove_buildings(&mut self, ids: &[u32]) {
+        for v in self.occ.iter_mut() {
+            if *v != 0 && ids.contains(&*v) {
+                *v = 0;
+            }
+        }
+        self.buildings.retain(|b| !ids.contains(&b.id));
+    }
+
+    pub fn silos_of(&self, country: u16) -> Vec<usize> {
+        (0..self.buildings.len())
+            .filter(|&i| {
+                let b = &self.buildings[i];
+                b.kind == IDX_SILO && b.country == country && b.dismantle_at.is_none()
+            })
+            .collect()
+    }
+
+    /// AI helper: find a spot and build `kind` for country `c`.
+    pub fn ai_place_kind(&mut self, c: usize, kind: usize, ctx: &EconCtx, map: &MapData) -> bool {
+        match self.find_spot(c, kind, ctx, map) {
+            Some((gx, gy)) => self.place(map, gx, gy, c as u16, kind).is_ok(),
+            None => false,
+        }
     }
 
     /// A random coastal spot for a port (self-test helper).

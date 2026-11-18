@@ -95,6 +95,150 @@ const ASSIST_AI_BASE: f32 = 0.80;
 const ASSIST_AI_AGGRESSION_W: f32 = 0.20;
 const ASSIST_AI_STRENGTH_W: f32 = 0.10;
 
+// CONFIG.missile / CONFIG.airDefense / CONFIG.aiMissiles
+const MISSILE_SPEED: f32 = 14.0;
+const MISSILE_MIN_ALT: f32 = 20.0;
+const MISSILE_MAX_ALT: f32 = 60.0;
+const MISSILE_ALT_PER_DIST: f32 = 0.12;
+const ROUTE_SAMPLES: usize = 96;
+const MISSILE_PRELAUNCH_S: f32 = 5.0;
+const MISSILE_COOLDOWN_S: f32 = 30.0;
+const IMPACT_RADIUS: f32 = 17.0;
+const IMPACT_VARIATION: f32 = 0.12;
+const IMPACT_SPREAD_S: f32 = 1.8;
+const URBAN_POP_SHARE: f32 = 0.9;
+const CAPITAL_URBAN_WEIGHT: f32 = 1.5;
+const URBAN_REACH_MULT: f32 = 1.15;
+const URBAN_DAMAGE_CURVE: f32 = 1.35;
+const URBAN_MIN_SEVERITY: f32 = 0.05;
+const URBAN_LOCALITY_MULT: f32 = 6.0;
+const URBAN_CITY_LOSS_CAP: f32 = 0.3;
+const RURAL_LOSS_MULT: f32 = 2.6;
+const RURAL_LOSS_MAX: f32 = 0.55;
+const CAPITAL_SHOCK: f32 = 0.2;
+const CAPITAL_CRISIS_MIN_SEVERITY: f32 = 0.15;
+const MAX_POP_LOSS: f32 = 0.92;
+const RESERVE_LOSS_MULT: f32 = 1.5;
+const FRONT_MIN_LOSS_FRAC: f32 = 0.02;
+const FRONT_MAX_LOSS_FRAC: f32 = 0.65;
+const FRONT_BORDER_LOSS_MULT: f32 = 0.9;
+const FRONT_DEFENDER_LOSS_MULT: f32 = 0.65;
+const CRATER_HEAL_DAYS: f32 = 30.0;
+const CRATER_HEAL_STEPS: u32 = 32;
+const BURN_DAYS: f32 = 8.0;
+const FADE_DAYS: f32 = 2.0;
+const CAPITAL_CRISIS_DAYS: f32 = 90.0;
+const CRISIS_DEFENSE_WEAKNESS: f32 = 0.6;
+const CRISIS_FRONT_SPEED: f32 = 2.8;
+const AD_CHECK_S: f32 = 0.24;
+const AD_RANGE: [f32; 4] = [0.0, 24.0, 27.0, 30.0];
+const AD_SPEED: f32 = 46.0;
+const AD_RELOAD_S: [f32; 4] = [0.0, 4.6, 2.4, 1.3];
+const AD_SHOTS: [u32; 4] = [0, 1, 2, 3];
+const AD_BASE_HIT: [f32; 4] = [0.0, 0.43, 0.54, 0.64];
+const AD_HIT_RADIUS: f32 = 4.5;
+pub const MISSILE_COST_MONEY: f32 = 50.0;
+pub const MISSILE_COST_OIL: f32 = 8.0;
+pub const MISSILE_COST_URANIUM: f32 = 1.5;
+const AIM_CHECK_S: f32 = 15.0;
+const AIM_GLOBAL_GAP_S: f32 = 150.0;
+const AIM_COUNTRY_GAP_S: f32 = 360.0;
+const AIM_SAMPLES: usize = 12;
+const AIM_BUILD: f32 = 0.0006;
+const AIM_LAUNCH: f32 = 0.004;
+
+#[derive(Clone)]
+pub struct MissileFlight {
+    pub id: u32,
+    pub country: u16,
+    pub silo_id: u32,
+    pub sx: f32,
+    pub sy: f32,
+    pub tx: f32,
+    pub ty: f32,
+    pub tcell: usize,
+    pub start_at: f32,
+    pub impact_at: f32,
+    pub intercepted_at: Option<f32>,
+    pub ix: f32,
+    pub iy: f32,
+    pub impact_done: bool,
+}
+
+#[derive(Clone)]
+pub struct Interceptor {
+    pub battery: u32,
+    pub country: u16,
+    pub target: u32,
+    pub sx: f32,
+    pub sy: f32,
+    pub ax: f32,
+    pub ay: f32,
+    pub start_at: f32,
+    pub arrive_at: f32,
+    pub chance: f32,
+    /// Some(hit) once resolved
+    pub resolved: Option<bool>,
+    pub resolved_at: f32,
+}
+
+#[derive(Clone)]
+pub struct Site {
+    pub id: u32,
+    pub x: f32,
+    pub y: f32,
+    pub radius: i32,
+    pub attacker: u16,
+    pub impact_at: f32,
+    pub apply_at: f32,
+    pub applied: bool,
+    pub burn_day: f32,
+    pub cells: Vec<usize>,
+    pub healed: bool,
+    pub heal_stage: u32,
+}
+
+fn nuke_noise(x: i32, y: i32, seed: i32) -> f32 {
+    let mut n = x.wrapping_mul(374761393).wrapping_add(y.wrapping_mul(668265263)).wrapping_add(seed);
+    n = (n ^ (((n as u32) >> 13) as i32)).wrapping_mul(1274126177);
+    (((n ^ (((n as u32) >> 16) as i32)) as u32) as f32) / 4294967295.0
+}
+
+fn site_seed(id: u32) -> i32 {
+    id.wrapping_mul(2654435761) as i32
+}
+
+fn missile_altitude(sx: f32, sy: f32, tx: f32, ty: f32) -> f32 {
+    (((tx - sx).powi(2) + (ty - sy).powi(2)).sqrt() * MISSILE_ALT_PER_DIST).clamp(MISSILE_MIN_ALT, MISSILE_MAX_ALT)
+}
+
+fn route_len(sx: f32, sy: f32, tx: f32, ty: f32, h: f32) -> f32 {
+    let mut prev = (sx, sy, 0.0f32);
+    let mut len = 0.0f32;
+    for i in 1..ROUTE_SAMPLES {
+        let u = i as f32 / (ROUTE_SAMPLES - 1) as f32;
+        let inv = 1.0 - u;
+        let glide = u * u * (3.0 - 2.0 * u);
+        let z = 3.0 * inv * inv * u * (h * 1.8) + 3.0 * inv * u * u * (h * 0.75);
+        let p = (sx + (tx - sx) * glide, sy + (ty - sy) * glide, z);
+        len += ((p.0 - prev.0).powi(2) + (p.1 - prev.1).powi(2) + (p.2 - prev.2).powi(2)).sqrt();
+        prev = p;
+    }
+    len
+}
+
+/// Ground position of a missile at sim time `t`.
+pub fn flight_pos(f: &MissileFlight, t: f32) -> (f32, f32) {
+    let span = (f.impact_at - f.start_at).max(0.001);
+    let u = ((t - f.start_at) / span).clamp(0.0, 1.0);
+    let glide = u * u * (3.0 - 2.0 * u);
+    (f.sx + (f.tx - f.sx) * glide, f.sy + (f.ty - f.sy) * glide)
+}
+
+pub fn air_defense_range(level: u8) -> f32 {
+    AD_RANGE[(level as usize).clamp(1, 3)]
+}
+
 // CONFIG.naval
 const NAVAL_LOAD_S: f32 = 5.2;
 const NAVAL_MANPOWER_PER_BOAT: f32 = 4000.0;
@@ -256,6 +400,21 @@ pub struct Sim {
     enc_epoch: u32,
     sea_dist: Vec<i32>,
     sea_queue: Vec<u32>,
+    pub flights: Vec<MissileFlight>,
+    pub interceptors: Vec<Interceptor>,
+    pub sites: Vec<Site>,
+    silo_cd: HashMap<u32, f32>,
+    battery_cd: HashMap<u32, f32>,
+    shots: HashMap<(u32, u32), u32>,
+    next_flight_id: u32,
+    ad_next: f32,
+    ai_missile_next: f32,
+    ai_missile_last_global: f32,
+    ai_missile_last_country: Vec<f32>,
+    crisis_until: Vec<f32>,
+    crisis_strength: Vec<f32>,
+    /// test hook: multiplies AI missile chances (ATLAS_MISSILE_BOOST)
+    missile_boost: f32,
 }
 
 fn clamp01(v: f32) -> f32 {
@@ -369,6 +528,20 @@ impl Sim {
             enc_epoch: 0,
             sea_dist: Vec::new(),
             sea_queue: Vec::new(),
+            flights: Vec::new(),
+            interceptors: Vec::new(),
+            sites: Vec::new(),
+            silo_cd: HashMap::new(),
+            battery_cd: HashMap::new(),
+            shots: HashMap::new(),
+            next_flight_id: 1,
+            ad_next: 0.0,
+            ai_missile_next: AIM_CHECK_S,
+            ai_missile_last_global: -1000.0,
+            ai_missile_last_country: vec![-1000.0; n],
+            crisis_until: vec![0.0; n],
+            crisis_strength: vec![0.0; n],
+            missile_boost: std::env::var("ATLAS_MISSILE_BOOST").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
         };
         s.rebuild_adjacency(world);
         s
@@ -408,7 +581,8 @@ impl Sim {
     fn power_ratio(&self, f: &Front) -> f32 {
         let (a, d) = (f.attacker as usize, f.defender as usize);
         let att_cmd = 1.0 - COMMAND_ATTACK_WEAKNESS * if self.capital_fallen[a] { 1.0 } else { 0.0 };
-        let def_cmd = 1.0 - COMMAND_DEFENSE_WEAKNESS * if self.capital_fallen[d] { 1.0 } else { 0.0 };
+        let crisis = if self.game_days < self.crisis_until[d] { CRISIS_DEFENSE_WEAKNESS * self.crisis_strength[d] } else { 0.0 };
+        let def_cmd = 1.0 - (COMMAND_DEFENSE_WEAKNESS * if self.capital_fallen[d] { 1.0 } else { 0.0 }).max(crisis);
         let att = (f.committed * att_cmd).max(1.0);
         let dig = 1.0 + f.dig_in.clamp(0.0, 1.0) * DIG_IN_MAX_BONUS;
         let def = (f.def_alloc * def_cmd * dig).max(1.0);
@@ -416,7 +590,11 @@ impl Sim {
     }
 
     fn speed_mult(&self, f: &Front) -> f32 {
-        let ratio_mult = self.power_ratio(f).clamp(SPEED_MIN, SPEED_MAX);
+        let mut ratio_mult = self.power_ratio(f).clamp(SPEED_MIN, SPEED_MAX);
+        let dd = f.defender as usize;
+        if self.game_days < self.crisis_until[dd] {
+            ratio_mult *= 1.0 + (CRISIS_FRONT_SPEED - 1.0) * self.crisis_strength[dd];
+        }
         if !f.collapse {
             return ratio_mult;
         }
@@ -827,6 +1005,607 @@ impl Sim {
         self.assists = keep;
     }
 
+
+
+    // ------------------------------------------------------------------ missiles, silos, air defense
+    pub fn silo_cooldown_left(&self, silo_id: u32) -> f32 {
+        (self.silo_cd.get(&silo_id).copied().unwrap_or(0.0) - self.time).max(0.0)
+    }
+
+    pub fn can_afford_missile(&self, c: u16) -> bool {
+        let st = &self.econ.stock[c as usize];
+        st[0] >= MISSILE_COST_MONEY && st[4] >= MISSILE_COST_OIL && st[5] >= MISSILE_COST_URANIUM
+    }
+
+    pub fn war_enemies(&self, c: usize) -> Vec<u16> {
+        (1..self.n).filter(|&e| self.at_war[c * self.n + e] && self.cells[e] > 0).map(|e| e as u16).collect()
+    }
+
+    /// startMissileFlight: fire a missile from a silo at a land cell.
+    pub fn launch_missile(&mut self, player: u16, silo_id: u32, tx: i32, ty: i32, world: &World) -> Result<(), &'static str> {
+        let Some(b) = self.econ.buildings.iter().find(|b| b.id == silo_id).cloned() else { return Err("NO SILO") };
+        if b.kind != crate::econ::IDX_SILO || b.dismantle_at.is_some() || b.country != player {
+            return Err("SILO NOT AVAILABLE");
+        }
+        let (w, h) = (self.w as i32, self.h as i32);
+        if tx < 0 || ty < 0 || tx >= w || ty >= h || world.map.land[ty as usize * self.w + tx as usize] != 1 {
+            return Err("PICK A TARGET ON LAND");
+        }
+        if self.silo_cooldown_left(silo_id) > 0.0 {
+            return Err("SILO RELOADING");
+        }
+        if !self.can_afford_missile(player) {
+            return Err("NOT ENOUGH RESOURCES TO LAUNCH");
+        }
+        let (sx, sy) = (b.gx as f32 + 2.0, b.gy as f32 + 2.0);
+        let (txf, tyf) = (tx as f32 + 0.5, ty as f32 + 0.5);
+        let alt = missile_altitude(sx, sy, txf, tyf);
+        let duration = route_len(sx, sy, txf, tyf, alt) / MISSILE_SPEED;
+        let st = &mut self.econ.stock[player as usize];
+        st[0] -= MISSILE_COST_MONEY;
+        st[4] -= MISSILE_COST_OIL;
+        st[5] -= MISSILE_COST_URANIUM;
+        let start_at = self.time + MISSILE_PRELAUNCH_S;
+        let id = self.next_flight_id;
+        self.next_flight_id += 1;
+        self.flights.push(MissileFlight {
+            id,
+            country: player,
+            silo_id,
+            sx,
+            sy,
+            tx: txf,
+            ty: tyf,
+            tcell: ty as usize * self.w + tx as usize,
+            start_at,
+            impact_at: start_at + duration,
+            intercepted_at: None,
+            ix: 0.0,
+            iy: 0.0,
+            impact_done: false,
+        });
+        self.silo_cd.insert(silo_id, start_at + MISSILE_COOLDOWN_S);
+        let msg = format!("{} LAUNCHES A MISSILE", self.names[player as usize]);
+        self.say(msg);
+        Ok(())
+    }
+
+    fn strike_war(&mut self, att: u16, target: u16) {
+        let n = self.n;
+        let (a, t) = (att as usize, target as usize);
+        if a == t || self.eliminated[t] {
+            return;
+        }
+        self.allies[a * n + t] = false;
+        self.allies[t * n + a] = false;
+        self.peace_offers.retain(|&x| x != att && x != target);
+        if !self.at_war[a * n + t] {
+            self.at_war[a * n + t] = true;
+            self.at_war[t * n + a] = true;
+            self.war_idle[a * n + t] = 0.0;
+            self.war_idle[t * n + a] = 0.0;
+            let msg = format!("{} STRIKES {}", self.names[a], self.names[t]);
+            self.say(msg);
+            if !self.is_human(target) {
+                self.ai_commit(target, att, true);
+            }
+        }
+    }
+
+    fn tick_missiles(&mut self, world: &mut World) {
+        let now = self.time;
+        if !self.flights.is_empty() && now >= self.ad_next {
+            self.ad_next = now + AD_CHECK_S;
+            self.air_defense_scan(world);
+        }
+        for k in 0..self.interceptors.len() {
+            if self.interceptors[k].resolved.is_some() || now < self.interceptors[k].arrive_at {
+                continue;
+            }
+            let it = self.interceptors[k].clone();
+            let mut hit = false;
+            if let Some(fi) = self.flights.iter().position(|f| f.id == it.target) {
+                if self.flights[fi].intercepted_at.is_none() && now < self.flights[fi].impact_at {
+                    let (px, py) = flight_pos(&self.flights[fi], now);
+                    let dist = ((px - it.ax).powi(2) + (py - it.ay).powi(2)).sqrt();
+                    let roll = self.rng.f();
+                    if dist <= AD_HIT_RADIUS && roll < it.chance.clamp(0.05, 0.86) {
+                        hit = true;
+                        self.flights[fi].intercepted_at = Some(now);
+                        self.flights[fi].ix = px;
+                        self.flights[fi].iy = py;
+                        let msg = format!("{} MISSILE INTERCEPTED", self.names[self.flights[fi].country as usize]);
+                        self.say(msg);
+                    }
+                }
+            }
+            self.interceptors[k].resolved = Some(hit);
+            self.interceptors[k].resolved_at = now;
+        }
+        self.interceptors.retain(|i| i.resolved.map_or(true, |_| now - i.resolved_at < 2.0));
+        for fi in 0..self.flights.len() {
+            let f = self.flights[fi].clone();
+            if f.intercepted_at.is_some() || f.impact_done || now < f.impact_at {
+                continue;
+            }
+            self.flights[fi].impact_done = true;
+            let seed = site_seed(f.id);
+            let variation = nuke_noise(f.tx as i32, f.ty as i32, seed);
+            let radius = ((IMPACT_RADIUS * (1.0 + (variation * 2.0 - 1.0) * IMPACT_VARIATION)).round() as i32).max(1);
+            self.sites.push(Site { id: f.id, x: f.tx, y: f.ty, radius, attacker: f.country, impact_at: f.impact_at, apply_at: f.impact_at + IMPACT_SPREAD_S, applied: false, burn_day: 0.0, cells: Vec::new(), healed: false, heal_stage: 0 });
+            let owner = world.map.owner[f.tcell];
+            if owner != 0 && owner != f.country {
+                self.strike_war(f.country, owner);
+            }
+        }
+        for si in 0..self.sites.len() {
+            if !self.sites[si].applied && now >= self.sites[si].apply_at {
+                self.apply_impact(si, world);
+            }
+        }
+        for si in 0..self.sites.len() {
+            let s = &self.sites[si];
+            if !s.applied || s.healed {
+                continue;
+            }
+            let start = BURN_DAYS + FADE_DAYS;
+            let age = self.game_days - s.burn_day;
+            let stage = (CRATER_HEAL_STEPS as f32 * ((age - start) / (CRATER_HEAL_DAYS - start).max(1.0)).clamp(0.0, 1.0)).floor() as u32;
+            if stage > s.heal_stage {
+                let level = (255.0 * (1.0 - stage as f32 / CRATER_HEAL_STEPS as f32)) as u8;
+                let cells = self.sites[si].cells.clone();
+                let mut bx = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+                for &c in &cells {
+                    if world.map.crater[c] > level {
+                        world.map.crater[c] = level;
+                    }
+                    let (x, y) = ((c % self.w) as i32, (c / self.w) as i32);
+                    bx = [bx[0].min(x), bx[1].min(y), bx[2].max(x), bx[3].max(y)];
+                }
+                self.sites[si].heal_stage = stage;
+                self.sites[si].healed = stage >= CRATER_HEAL_STEPS;
+                if bx[0] <= bx[2] {
+                    self.dirty.push(bx);
+                }
+            }
+        }
+        self.flights.retain(|f| match f.intercepted_at {
+            Some(t) => now < t + 2.1,
+            None => !f.impact_done || now < f.impact_at + 5.0,
+        });
+        if self.sites.len() > 64 {
+            let day = self.game_days;
+            self.sites.retain(|s| !s.healed || day - s.burn_day < 180.0);
+        }
+        let live: Vec<u32> = self.flights.iter().map(|f| f.id).collect();
+        self.shots.retain(|(fid, _), _| live.contains(fid));
+    }
+
+    fn air_defense_scan(&mut self, world: &World) {
+        let now = self.time;
+        let batteries: Vec<(u32, u16, f32, f32, usize)> = self
+            .econ
+            .buildings
+            .iter()
+            .filter(|b| b.kind == crate::econ::IDX_AIRDEF && b.dismantle_at.is_none())
+            .map(|b| (b.id, b.country, b.gx as f32 + 2.0, b.gy as f32 + 2.0, (b.level as usize).clamp(1, 3)))
+            .collect();
+        for (bid, bc, bx, by, lvl) in batteries {
+            if self.interceptors.len() >= 64 {
+                break;
+            }
+            if self.battery_cd.get(&bid).copied().unwrap_or(0.0) > now {
+                continue;
+            }
+            let range = AD_RANGE[lvl];
+            let mut chosen: Option<usize> = None;
+            let mut closest = f32::MAX;
+            for (fi, f) in self.flights.iter().enumerate() {
+                if f.intercepted_at.is_some() || now < f.start_at || now >= f.impact_at - 0.4 {
+                    continue;
+                }
+                if f.country == bc || self.are_allies(f.country, bc) {
+                    continue;
+                }
+                let owner = world.map.owner[f.tcell];
+                if owner != bc && !(owner != 0 && self.are_allies(owner, bc)) {
+                    continue;
+                }
+                if self.shots.get(&(f.id, bid)).copied().unwrap_or(0) >= AD_SHOTS[lvl] {
+                    continue;
+                }
+                let (px, py) = flight_pos(f, now);
+                let hz = ((px - bx).powi(2) + (py - by).powi(2)).sqrt();
+                if hz > range {
+                    continue;
+                }
+                let urgency = (f.impact_at - now) + hz * 0.02;
+                if urgency < closest {
+                    closest = urgency;
+                    chosen = Some(fi);
+                }
+            }
+            let Some(fi) = chosen else { continue };
+            let f = self.flights[fi].clone();
+            let (mut ax, mut ay) = flight_pos(&f, now);
+            let mut dur = 0.0f32;
+            for _ in 0..3 {
+                dur = (((ax - bx).powi(2) + (ay - by).powi(2)).sqrt() / AD_SPEED).max(0.35);
+                let p = flight_pos(&f, now + dur);
+                ax = p.0;
+                ay = p.1;
+            }
+            if now + dur >= f.impact_at - 0.15 {
+                continue;
+            }
+            *self.shots.entry((f.id, bid)).or_insert(0) += 1;
+            self.battery_cd.insert(bid, now + AD_RELOAD_S[lvl]);
+            let chance = AD_BASE_HIT[lvl] - 0.08 * (((ax - bx).powi(2) + (ay - by).powi(2)).sqrt()) / range;
+            self.interceptors.push(Interceptor { battery: bid, country: bc, target: f.id, sx: bx, sy: by, ax, ay, start_at: now, arrive_at: now + dur, chance, resolved: None, resolved_at: 0.0 });
+        }
+    }
+
+    fn site_contains(&self, s: &Site, x: i32, y: i32) -> bool {
+        let r = s.radius as f32;
+        let (dx, dy) = (x as f32 + 0.5 - s.x, y as f32 + 0.5 - s.y);
+        if dx.abs() > r || dy.abs() > r {
+            return false;
+        }
+        (dx * dx + dy * dy).sqrt() <= r * (0.91 + 0.18 * nuke_noise(x, y, site_seed(s.id)))
+    }
+
+    /// _applyMissileImpact: craters, population + reserve losses, front casualties, destroyed buildings,
+    /// capital crisis. Ownership never changes: only war fronts take land.
+    fn apply_impact(&mut self, si: usize, world: &mut World) {
+        let (sx, sy, r, att, sid) = {
+            let s = &self.sites[si];
+            (s.x, s.y, s.radius, s.attacker, s.id)
+        };
+        let (w, h) = (self.w as i32, self.h as i32);
+        let wu = self.w;
+        let seed = site_seed(sid);
+        let rf = r as f32;
+        let mut hit: Vec<usize> = Vec::new();
+        let mut exposure: HashMap<u16, f32> = HashMap::new();
+        let mut bx = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        let y0 = ((sy - rf).floor() as i32).max(0);
+        let y1 = ((sy + rf).ceil() as i32).min(h - 1);
+        let x0 = ((sx - rf).floor() as i32).max(0);
+        let x1 = ((sx + rf).ceil() as i32).min(w - 1);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let i = y as usize * wu + x as usize;
+                if world.map.land[i] != 1 {
+                    continue;
+                }
+                let dist = ((x as f32 + 0.5 - sx).powi(2) + (y as f32 + 0.5 - sy).powi(2)).sqrt();
+                let edge = 0.91 + 0.18 * nuke_noise(x, y, seed);
+                if dist <= rf * edge {
+                    hit.push(i);
+                    let o = world.map.owner[i];
+                    if o != 0 {
+                        *exposure.entry(o).or_insert(0.0) += (1.0 - dist / rf).max(0.0).powf(1.4);
+                    }
+                    bx = [bx[0].min(x), bx[1].min(y), bx[2].max(x), bx[3].max(y)];
+                }
+            }
+        }
+        self.sites[si].applied = true;
+        self.sites[si].burn_day = self.game_days;
+        if hit.is_empty() {
+            return;
+        }
+        struct Urban {
+            all: f32,
+            hit: f32,
+            cap_sev: f32,
+        }
+        let mut urban: HashMap<u16, Urban> = HashMap::new();
+        for cap in &world.map.capitals {
+            let owner = world.map.owner[cap.y as usize * wu + cap.x as usize];
+            if owner == 0 {
+                continue;
+            }
+            let (mx, my) = (cap.x as f32 + 1.0, cap.y as f32 + 1.0);
+            let reach = rf * URBAN_REACH_MULT;
+            let prox = (1.0 - ((mx - sx).powi(2) + (my - sy).powi(2)).sqrt() / reach.max(1.0)).clamp(0.0, 1.0);
+            let sev = prox.powf(URBAN_DAMAGE_CURVE);
+            let it = urban.entry(owner).or_insert(Urban { all: 0.0, hit: 0.0, cap_sev: 0.0 });
+            it.all += CAPITAL_URBAN_WEIGHT;
+            if sev >= URBAN_MIN_SEVERITY {
+                it.hit += CAPITAL_URBAN_WEIGHT * sev;
+                it.cap_sev = it.cap_sev.max(sev);
+            }
+        }
+        let mut affected: Vec<u16> = exposure.keys().copied().collect();
+        for (c, u) in &urban {
+            if u.hit > 0.0 && !affected.contains(c) {
+                affected.push(*c);
+            }
+        }
+        let mut hitmask = vec![false; wu * self.h];
+        for &i in &hit {
+            hitmask[i] = true;
+        }
+        self.impact_front_casualties(&hitmask, world);
+        for &i in &hit {
+            world.map.crater[i] = 255;
+        }
+        for &c in &affected {
+            if c != att {
+                self.strike_war(att, c);
+            }
+        }
+        let mut total_dead = 0.0f32;
+        let mut target_name = String::new();
+        for &c in &affected {
+            let ci = c as usize;
+            let before = (self.cells[ci].max(1)) as f32;
+            let direct = RURAL_LOSS_MAX.min(RURAL_LOSS_MULT * exposure.get(&c).copied().unwrap_or(0.0) / before);
+            let (mut urban_loss, mut capital_shock, mut cap_sev) = (0.0f32, 0.0f32, 0.0f32);
+            if let Some(u) = urban.get(&c) {
+                let footprint = std::f32::consts::PI * (rf * URBAN_REACH_MULT).powi(2);
+                let locality = (URBAN_LOCALITY_MULT * footprint / before).clamp(0.0, 1.0);
+                if u.all > 0.0 {
+                    urban_loss = URBAN_CITY_LOSS_CAP.min(URBAN_POP_SHARE * u.hit / u.all * locality);
+                }
+                capital_shock = CAPITAL_SHOCK * u.cap_sev;
+                cap_sev = u.cap_sev;
+            }
+            if cap_sev >= CAPITAL_CRISIS_MIN_SEVERITY && !self.capital_fallen[ci] {
+                self.crisis_strength[ci] = self.crisis_strength[ci].max(cap_sev);
+                self.crisis_until[ci] = self.crisis_until[ci].max(self.game_days + CAPITAL_CRISIS_DAYS);
+                let msg = format!("{}'S CAPITAL STRUCK - DEFENSES IN CRISIS", self.names[ci]);
+                self.say(msg);
+            }
+            let loss = MAX_POP_LOSS.min(1.0 - (1.0 - direct) * (1.0 - urban_loss) * (1.0 - capital_shock));
+            let pop = self.pop[ci];
+            let after = (pop * (1.0 - loss)).max(0.01);
+            total_dead += (pop - after).max(0.0) * 1.0e6;
+            self.pop[ci] = after;
+            self.manpower[ci] = (self.manpower[ci] * (1.0 - (loss * RESERVE_LOSS_MULT).min(0.98))).max(0.0);
+            if target_name.is_empty() {
+                target_name = self.names[ci].clone();
+            }
+        }
+        let site = self.sites[si].clone();
+        let doomed: Vec<u32> = self
+            .econ
+            .buildings
+            .iter()
+            .filter(|b| self.site_contains(&site, b.gx + 2, b.gy + 2))
+            .map(|b| b.id)
+            .collect();
+        if !doomed.is_empty() {
+            self.econ.remove_buildings(&doomed);
+        }
+        self.sites[si].cells = hit;
+        self.dirty.push(bx);
+        let casualties = if total_dead >= 1.0e6 { format!("{:.1}M", total_dead / 1.0e6) } else { format!("{:.0}K", total_dead / 1.0e3) };
+        let msg = format!("{} STRIKES {}: {} DEAD, {} BUILDINGS DESTROYED", self.names[att as usize], target_name, casualties, doomed.len());
+        self.say(msg);
+    }
+
+    /// _impactFrontCasualties: troops fighting along the blasted border are hit.
+    fn impact_front_casualties(&mut self, hitmask: &[bool], world: &World) {
+        let (w, h) = (self.w as i32, self.h as i32);
+        let wu = self.w;
+        let owner = &world.map.owner;
+        let adjacent = |i: usize, other: u16| -> bool {
+            let (x, y) = ((i % wu) as i32, (i / wu) as i32);
+            (x > 0 && owner[i - 1] == other) || (x < w - 1 && owner[i + 1] == other) || (y > 0 && owner[i - wu] == other) || (y < h - 1 && owner[i + wu] == other)
+        };
+        for fi in 0..self.fronts.len() {
+            let (att, def, committed, def_alloc, done) = {
+                let f = &self.fronts[fi];
+                (f.attacker, f.defender, f.committed, f.def_alloc, f.done)
+            };
+            if done || committed <= 0.0 {
+                continue;
+            }
+            let (mut hit_att, mut hit_def, mut tot_att, mut tot_def) = (0u32, 0u32, 0u32, 0u32);
+            let ba = self.bbox[att as usize];
+            let bd = self.bbox[def as usize];
+            let (x0, y0, x1, y1) = (ba[0].min(bd[0]).max(0), ba[1].min(bd[1]).max(0), ba[2].max(bd[2]).min(w - 1), ba[3].max(bd[3]).min(h - 1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let i = y as usize * wu + x as usize;
+                    let o = owner[i];
+                    if o == att && adjacent(i, def) {
+                        tot_att += 1;
+                        if hitmask[i] {
+                            hit_att += 1;
+                        }
+                    } else if o == def && adjacent(i, att) {
+                        tot_def += 1;
+                        if hitmask[i] {
+                            hit_def += 1;
+                        }
+                    }
+                }
+            }
+            if hit_att == 0 && hit_def == 0 {
+                continue;
+            }
+            let exposed = (hit_att as f32 / tot_att.max(1) as f32).max(hit_def as f32 / tot_def.max(1) as f32);
+            let fraction = (exposed * FRONT_BORDER_LOSS_MULT).clamp(FRONT_MIN_LOSS_FRAC, FRONT_MAX_LOSS_FRAC);
+            let att_loss = committed * fraction;
+            self.fronts[fi].committed = (committed - att_loss).max(0.0);
+            let pool = self.manpower[def as usize];
+            let def_loss = pool.min(def_alloc * fraction * FRONT_DEFENDER_LOSS_MULT);
+            self.manpower[def as usize] = (pool - def_loss).max(0.0);
+        }
+    }
+
+    // ------------------------------------------------------------------ AI missiles
+    fn ai_missile_target(&mut self, c: usize, enemies: &[u16], world: &World) -> Option<(i32, i32)> {
+        let (w, h) = (self.w as i32, self.h as i32);
+        let wu = self.w;
+        let radius = (IMPACT_RADIUS * (1.0 + IMPACT_VARIATION)).ceil() as i32 + 1;
+        let r2 = radius * radius;
+        let mut cands: Vec<(i32, i32, u16, f32)> = Vec::new();
+        for cap in &world.map.capitals {
+            if enemies.contains(&cap.country) {
+                cands.push((cap.x as i32 + 1, cap.y as i32 + 1, cap.country, 6.0));
+            }
+        }
+        for &e in enemies {
+            let bb = self.bbox[e as usize];
+            if bb[2] < bb[0] {
+                continue;
+            }
+            let mut got = 0;
+            for _ in 0..AIM_SAMPLES * 6 {
+                if got >= AIM_SAMPLES {
+                    break;
+                }
+                let x = bb[0] + self.rng.range((bb[2] - bb[0] + 1) as usize) as i32;
+                let y = bb[1] + self.rng.range((bb[3] - bb[1] + 1) as usize) as i32;
+                if x >= 0 && y >= 0 && x < w && y < h && world.map.owner[y as usize * wu + x as usize] == e {
+                    cands.push((x, y, e, 1.0));
+                    got += 1;
+                }
+            }
+        }
+        let mut best: Option<(i32, i32)> = None;
+        let mut best_score = f32::MIN;
+        for (gx, gy, e, base) in cands {
+            if gx < 0 || gy < 0 || gx >= w || gy >= h {
+                continue;
+            }
+            let center = gy as usize * wu + gx as usize;
+            if world.map.owner[center] != e || world.map.land[center] != 1 || world.map.crater[center] != 0 {
+                continue;
+            }
+            let mut safe = true;
+            let mut area = 0i32;
+            'scan: for dy in -radius..=radius {
+                let y = gy + dy;
+                if y < 0 || y >= h {
+                    continue;
+                }
+                for dx in -radius..=radius {
+                    if dx * dx + dy * dy > r2 {
+                        continue;
+                    }
+                    let x = gx + dx;
+                    if x < 0 || x >= w {
+                        continue;
+                    }
+                    let o = world.map.owner[y as usize * wu + x as usize];
+                    if o == 0 {
+                        continue;
+                    }
+                    if !enemies.contains(&o) {
+                        safe = false;
+                        break 'scan;
+                    }
+                    area += 1;
+                }
+            }
+            if !safe || (area as f32) < (radius * radius) as f32 * 0.35 {
+                continue;
+            }
+            if self.sites.iter().any(|s| s.applied && !s.healed && ((s.x - gx as f32).powi(2) + (s.y - gy as f32).powi(2)).sqrt() < s.radius as f32 + radius as f32 * 0.5) {
+                continue;
+            }
+            let pressure = if self.fronts.iter().any(|f| f.attacker == e && f.defender as usize == c && f.committed > 0.0) { 2.0 } else { 0.0 };
+            let score = base + pressure + (area as f32 / (std::f32::consts::PI * r2 as f32)).min(1.0) + self.rng.f() * 0.2;
+            if score > best_score {
+                best_score = score;
+                best = Some((gx, gy));
+            }
+        }
+        best
+    }
+
+    fn econ_ai_place(&mut self, c: usize, kind: usize, world: &World) -> bool {
+        let ctx = EconCtx {
+            names: &self.names,
+            cells: &self.cells,
+            orig: &self.orig_cells,
+            fallen: &self.capital_fallen,
+            eliminated: &self.eliminated,
+            pop: &self.pop,
+            gdp: &self.live_gdp,
+            bbox: &self.bbox,
+        };
+        self.econ.ai_place_kind(c, kind, &ctx, &world.map)
+    }
+
+    /// _runAiMissiles + _aiTryBuildSilo + _aiTryBuildAirDefense (medium difficulty).
+    fn ai_missiles(&mut self, world: &World) {
+        use crate::econ::{IDX_AIRDEF, IDX_SILO};
+        let now = self.time;
+        if now < self.ai_missile_next {
+            return;
+        }
+        self.ai_missile_next = now + AIM_CHECK_S;
+        let n = self.n;
+        let rate = if self.w <= 1000 { 1.0f32 } else { 0.65 };
+        let max_silos = if self.w <= 1000 { 2 } else { 4 };
+        let boost = self.missile_boost;
+        let mut silos_now = self.econ.buildings.iter().filter(|b| b.kind == IDX_SILO && b.dismantle_at.is_none() && Some(b.country) != self.player).count();
+        for c in 1..n {
+            if self.eliminated[c] || self.is_human(c as u16) || self.capital_fallen[c] || self.cells[c] == 0 {
+                continue;
+            }
+            let enemies = self.war_enemies(c);
+            if enemies.is_empty() {
+                continue;
+            }
+            let has_silo = !self.econ.silos_of(c as u16).is_empty();
+            if !has_silo && silos_now < max_silos && self.rng.f() < AIM_BUILD * rate * boost {
+                let cost = self.econ.build_cost(IDX_SILO);
+                if self.econ.can_afford(c, &cost) && self.econ_ai_place(c, IDX_SILO, world) {
+                    silos_now += 1;
+                }
+            }
+            let has_ad = self.econ.buildings.iter().any(|b| b.kind == IDX_AIRDEF && b.country as usize == c && b.dismantle_at.is_none());
+            if !has_ad {
+                let inbound = self.flights.iter().any(|f| f.intercepted_at.is_none() && world.map.owner[f.tcell] as usize == c);
+                let foe_silo = self.econ.buildings.iter().any(|b| b.kind == IDX_SILO && enemies.contains(&b.country) && b.dismantle_at.is_none());
+                let cost = self.econ.build_cost(IDX_AIRDEF);
+                if (inbound || foe_silo) && self.econ.can_afford(c, &cost) {
+                    let chance = if inbound { 0.62 } else { 0.19 };
+                    if self.rng.f() < chance {
+                        let _ = self.econ_ai_place(c, IDX_AIRDEF, world);
+                    }
+                }
+            }
+        }
+        if now - self.ai_missile_last_global < AIM_GLOBAL_GAP_S {
+            return;
+        }
+        if self.flights.iter().any(|f| Some(f.country) != self.player && now < f.impact_at + IMPACT_SPREAD_S) {
+            return;
+        }
+        let silos: Vec<(u32, u16)> = self.econ.buildings.iter().filter(|b| b.kind == IDX_SILO && b.dismantle_at.is_none() && Some(b.country) != self.player).map(|b| (b.id, b.country)).collect();
+        if silos.is_empty() {
+            return;
+        }
+        let start = self.rng.range(silos.len());
+        for k in 0..silos.len() {
+            let (sid, c) = silos[(start + k) % silos.len()];
+            let ci = c as usize;
+            let enemies = self.war_enemies(ci);
+            if enemies.is_empty() || self.capital_fallen[ci] || !self.can_afford_missile(c) {
+                continue;
+            }
+            if now - self.ai_missile_last_country[ci] < AIM_COUNTRY_GAP_S || self.silo_cooldown_left(sid) > 0.0 {
+                continue;
+            }
+            if self.rng.f() >= AIM_LAUNCH * rate * boost {
+                continue;
+            }
+            let Some((tx, ty)) = self.ai_missile_target(ci, &enemies, world) else { continue };
+            if self.launch_missile(c, sid, tx, ty, world).is_ok() {
+                self.ai_missile_last_global = now;
+                self.ai_missile_last_country[ci] = now;
+                break;
+            }
+        }
+    }
 
     // ------------------------------------------------------------------ naval invasions
     pub fn naval_max_boats(&self, att: u16) -> u32 {
@@ -1314,7 +2093,7 @@ impl Sim {
         self.ai_timer += sd;
         if self.ai_timer >= AI_PASS_S {
             self.ai_timer = 0.0;
-            self.ai_pass();
+            self.ai_pass(&*world);
         }
         self.peace_timer += sd;
         if self.peace_timer >= 2.0 {
@@ -1338,6 +2117,7 @@ impl Sim {
             };
             self.econ.step(sd, &ctx, &world.map, self.player, self.time);
         }
+        self.tick_missiles(world);
         let now = self.time;
         self.log.retain(|(_, t)| now - *t < 30.0);
     }
@@ -1810,7 +2590,7 @@ impl Sim {
             let tf = clamp01(cur / orig);
             let territory_factor = TERRITORY_FLOOR + (1.0 - TERRITORY_FLOOR) * tf;
             let fallen = self.capital_fallen[id];
-            let capital_factor = if fallen { CAPITAL_FALLEN_MULT } else { 1.0 };
+            let capital_factor = if fallen { CAPITAL_FALLEN_MULT } else if self.game_days < self.crisis_until[id] { 0.5 } else { 1.0 };
             let loss = clamp01(1.0 - tf);
             let ramp = clamp01(loss / SURGE_LOSS_REF);
             let surge = SURGE_MAX.min(1.0 + ramp * (SURGE_MAX - 1.0) + if fallen { SURGE_CAPITAL_BONUS } else { 0.0 });
@@ -1827,7 +2607,7 @@ impl Sim {
     }
 
     // ------------------------------------------------------------------ AI
-    fn ai_pass(&mut self) {
+    fn ai_pass(&mut self, world: &World) {
         let n = self.n;
         let mut pairs: Vec<(usize, usize)> = Vec::new();
         for a in 1..n {
@@ -1844,6 +2624,7 @@ impl Sim {
         self.ally_pass();
         self.assist_pass();
         self.ai_declarations();
+        self.ai_missiles(world);
     }
 
     fn ai_commit(&mut self, a: u16, b: u16, retaliate: bool) {

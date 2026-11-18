@@ -122,7 +122,14 @@ impl World {
         } else {
             land_noise(x as i32, y as i32, base)
         };
-        self.bump(x, y, rgb, edge)
+        let out = self.bump(x, y, rgb, edge);
+        let cr = m.crater[i];
+        if cr > 0 {
+            let a = cr as f32 / 255.0 * 0.78;
+            let mix = |c: u8, d: f32| ((c as f32) * (1.0 - a) + d * a).round() as u8;
+            return [mix(out[0], 34.0), mix(out[1], 30.0), mix(out[2], 28.0)];
+        }
+        out
     }
 
     fn paint_cell(&mut self, x: usize, y: usize) {
