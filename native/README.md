@@ -18,7 +18,8 @@ Controls: drag / WASD pan, wheel / pinch / Q,E zoom, Space pause, +/- speed butt
 | 2. Renderer, camera, hover | written, not compiled yet |
 | 3a. Core war sim (manpower, fronts, capture, capital fall, AI wars + peace) | written, not compiled yet |
 | 3b. Provinces, buildings/economy, supply, focused attacks, naval, alliances, nukes | todo |
-| 3c. Supply lines (flood-fill readiness, exhaustion/recovery, per-front attrition) | written, awaiting CI |
+| 3c. Supply lines (flood-fill readiness, exhaustion/recovery, per-front attrition) | done (CI green) |
+| 3d. Regimes + policy sliders (12 regimes, 4 sliders, switch cost/cooldown, AI start rolls; feeds combat/pop/manpower/money/production) | sim done, UI todo |
 | 4. Full UI (menus, regime/policy, leaderboard details) | todo |
 | 5. Audio, multiplayer (replace PeerJS) | todo |
 

@@ -146,6 +146,9 @@ pub struct EconCtx<'a> {
     pub pop: &'a [f32],
     pub gdp: &'a [f32],
     pub bbox: &'a [[i32; 4]],
+    /// regime+policy multipliers per nation (ideology.rs)
+    pub mod_money: &'a [f32],
+    pub mod_prod: &'a [f32],
 }
 
 pub struct Econ {
@@ -557,11 +560,11 @@ impl Econ {
             let territory = TERRITORY_FLOOR + (1.0 - TERRITORY_FLOOR) * frac;
             let capital = if ctx.fallen[c] { CAPITAL_FALLEN_MULT } else { 1.0 };
             let mut gains = [0.0f32; RES_N];
-            gains[Res::Money as usize] = annual / 365.0 * territory * capital;
+            gains[Res::Money as usize] = annual / 365.0 * territory * capital * ctx.mod_money[c];
             for r in 0..RES_N {
-                gains[r] += fixed[c][r] / 365.0;
+                gains[r] += fixed[c][r] / 365.0 * ctx.mod_prod[c];
             }
-            gains[Res::Food as usize] += farm[c] / 365.0 * farm_scale(pop);
+            gains[Res::Food as usize] += farm[c] / 365.0 * ctx.mod_prod[c] * farm_scale(pop);
             let demand = if pop > OUTPUT_REF_POP { OUTPUT_REF_POP * (pop / OUTPUT_REF_POP).powf(OUTPUT_SCALE_EXP) } else { pop.max(0.0) };
             gains[Res::Food as usize] -= demand * CIVILIAN_FOOD_PER_POP;
             let mat_cap = MATERIAL_BASE + MATERIAL_PER_REF_POP * demand;

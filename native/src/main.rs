@@ -5,6 +5,7 @@ mod camera;
 mod config;
 mod econ;
 mod flags;
+mod ideology;
 mod input;
 mod mapdata;
 mod restex;

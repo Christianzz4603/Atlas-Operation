@@ -5,10 +5,12 @@
 //!   _updateDefenseAllocations / _defenseComponents, _regenManpower, _buildRegenCache,
 //!   _runAiDeclarations, _aiWantsPeace, capital-fall collapse.
 //! Supply lines (CONFIG.supply flood-fill readiness + attrition) are ported below.
+//! Regimes + policy sliders (ideology.rs) feed combat speed, population growth, manpower regen, money, production.
 //! NOT ported yet (approximated or skipped): dig-in/regroup realism extras, focused attacks,
 //! naval invasions, alliances/assists, buildings/economy, missiles/nukes, ideology/policy,
 //! empires, victory points, population sim, news feed, enclave capture.
 use crate::econ::{Econ, EconCtx};
+use crate::ideology;
 use crate::mapdata::MapData;
 use crate::world::World;
 use std::collections::HashMap;
@@ -438,6 +440,13 @@ pub struct Sim {
     supply_pool: Vec<Vec<u8>>,
     supply_queue: Vec<u32>,
     supply_last_check: u64,
+    /// regime index into ideology::REGIMES, slider positions, last switch day, cached multiplier bundle per nation
+    pub ideology: Vec<usize>,
+    pub policy: Vec<[f32; 4]>,
+    ideology_changed: Vec<f32>,
+    mods: Vec<ideology::Mods>,
+    mod_money: Vec<f32>,
+    mod_prod: Vec<f32>,
 }
 
 fn clamp01(v: f32) -> f32 {
@@ -496,6 +505,11 @@ impl Sim {
         let prev_cells = cells.clone();
         let density_ref = pop_base.iter().skip(1).sum::<f32>() / (cells.iter().sum::<u32>() as f32).max(1.0);
         let orig_cells = cells.clone();
+        let ideology_v: Vec<usize> = names.iter().map(|nm| ideology::roll_regime(nm, seed)).collect();
+        let policy_v: Vec<[f32; 4]> = names.iter().map(|nm| ideology::roll_policy(nm, seed)).collect();
+        let mods_v: Vec<ideology::Mods> = (0..n).map(|i| ideology::mods_for(ideology_v[i], &policy_v[i])).collect();
+        let mod_money_v: Vec<f32> = mods_v.iter().map(|m| m[ideology::K_MONEY]).collect();
+        let mod_prod_v: Vec<f32> = mods_v.iter().map(|m| m[ideology::K_PROD]).collect();
         let mut s = Sim {
             n,
             names,
@@ -569,6 +583,12 @@ impl Sim {
             supply_pool: Vec::new(),
             supply_queue: Vec::new(),
             supply_last_check: u64::MAX,
+            ideology: ideology_v,
+            policy: policy_v,
+            ideology_changed: vec![-ideology::COOLDOWN_DAYS; n],
+            mods: mods_v,
+            mod_money: mod_money_v,
+            mod_prod: mod_prod_v,
         };
         s.rebuild_adjacency(world);
         s
@@ -619,7 +639,9 @@ impl Sim {
     }
 
     fn speed_mult(&self, f: &Front) -> f32 {
-        let mut ratio_mult = self.power_ratio(f).clamp(SPEED_MIN, SPEED_MAX);
+        // regime layer: the attacker's doctrine (attack) against the defender's (defense), applied once, here
+        let i_mult = self.mods[f.attacker as usize][ideology::K_ATT] / self.mods[f.defender as usize][ideology::K_DEF].max(0.01);
+        let mut ratio_mult = self.power_ratio(f).clamp(SPEED_MIN, SPEED_MAX) * i_mult;
         let dd = f.defender as usize;
         if self.game_days < self.crisis_until[dd] {
             ratio_mult *= 1.0 + (CRISIS_FRONT_SPEED - 1.0) * self.crisis_strength[dd];
@@ -864,7 +886,7 @@ impl Sim {
                 pop = ceiling;
             }
             let at_war = self.fronts.iter().any(|f| !f.done && (f.attacker as usize == id || f.defender as usize == id));
-            let r_eff = pop_r * if at_war { POP_WAR_GROWTH_MULT } else { 1.0 };
+            let r_eff = pop_r * if at_war { POP_WAR_GROWTH_MULT } else { 1.0 } * self.mods[id][ideology::K_POP];
             let rdt = r_eff * dt;
             let next = if rdt > 0.0 { pop * (1.0 + rdt) / (1.0 + rdt * pop / pop.max(ceiling)) } else { pop };
             let village_growth = village_rate * dt / 365.0;
@@ -1562,6 +1584,8 @@ impl Sim {
             pop: &self.pop,
             gdp: &self.live_gdp,
             bbox: &self.bbox,
+                mod_money: &self.mod_money,
+                mod_prod: &self.mod_prod,
         };
         self.econ.ai_place_kind(c, kind, &ctx, &world.map)
     }
@@ -1660,6 +1684,8 @@ impl Sim {
             pop: &self.pop,
             gdp: &self.live_gdp,
             bbox: &self.bbox,
+                mod_money: &self.mod_money,
+                mod_prod: &self.mod_prod,
         };
         self.econ.any_coastal_spot(map, country, &ctx)
     }
@@ -2042,6 +2068,8 @@ impl Sim {
             pop: &self.pop,
             gdp: &self.gdp,
             bbox: &self.bbox,
+                mod_money: &self.mod_money,
+                mod_prod: &self.mod_prod,
         };
         self.econ.any_spot(map, country, &ctx)
     }
@@ -2148,12 +2176,95 @@ impl Sim {
                 pop: &self.pop,
                 gdp: &self.live_gdp,
                 bbox: &self.bbox,
+                mod_money: &self.mod_money,
+                mod_prod: &self.mod_prod,
             };
             self.econ.step(sd, &ctx, &world.map, self.player, self.time);
         }
         self.tick_missiles(world);
         let now = self.time;
         self.log.retain(|(_, t)| now - *t < 30.0);
+    }
+
+    // ------------------------------------------------------------------ regimes + policy (ideology.rs)
+    fn refresh_mods(&mut self, id: usize) {
+        let m = ideology::mods_for(self.ideology[id], &self.policy[id]);
+        self.mod_money[id] = m[ideology::K_MONEY];
+        self.mod_prod[id] = m[ideology::K_PROD];
+        self.mods[id] = m;
+    }
+
+    pub fn regime_def(&self, id: usize) -> &'static ideology::Regime {
+        &ideology::REGIMES[self.ideology[id]]
+    }
+
+    pub fn mods_of(&self, id: usize) -> ideology::Mods {
+        self.mods[id]
+    }
+
+    /// ideologyCooldownDaysLeft
+    pub fn ideology_cooldown_left(&self, id: usize) -> f32 {
+        (ideology::COOLDOWN_DAYS - (self.game_days - self.ideology_changed[id])).max(0.0)
+    }
+
+    /// ideologySwitchCost (money only): a slice of the nation's GDP, pricier mid-war.
+    pub fn ideology_switch_cost(&self, id: usize, regime: usize) -> f32 {
+        let at_war = self.fronts.iter().any(|f| !f.done && (f.attacker as usize == id || f.defender as usize == id));
+        let g = self.gdp[id];
+        let gdp = if g > 0.0 { g } else { 1.0 };
+        gdp * ideology::SWITCH_MONEY_GDP_FRAC * ideology::REGIMES[regime].cost_mult * if at_war { ideology::UNREST_WAR_MULT } else { 1.0 }
+    }
+
+    /// canSwitchIdeology: shared by the action and the (advisory) button state.
+    pub fn can_switch_ideology(&self, id: usize, regime: usize) -> Result<(), String> {
+        if id == 0 || id >= self.n || self.eliminated[id] {
+            return Err("NO NATION".to_string());
+        }
+        if regime >= ideology::REGIMES.len() {
+            return Err("UNKNOWN REGIME".to_string());
+        }
+        if self.ideology[id] == regime {
+            return Err("ALREADY ACTIVE".to_string());
+        }
+        let wait = self.ideology_cooldown_left(id);
+        if wait > 0.0 {
+            return Err(format!("WAIT {}D", wait.ceil() as u32));
+        }
+        if self.econ.stock[id][0] < self.ideology_switch_cost(id, regime) {
+            return Err("NEED FUNDS".to_string());
+        }
+        Ok(())
+    }
+
+    /// setIdeology: pay, install the regime and its default slider platform.
+    pub fn set_ideology(&mut self, id: usize, regime: usize) -> bool {
+        if let Err(reason) = self.can_switch_ideology(id, regime) {
+            self.say(reason);
+            return false;
+        }
+        let cost = self.ideology_switch_cost(id, regime);
+        self.econ.stock[id][0] -= cost;
+        self.ideology[id] = regime;
+        self.ideology_changed[id] = self.game_days;
+        self.policy[id] = ideology::regime_policy(regime);
+        self.refresh_mods(id);
+        let msg = format!("{} IS NOW {}", self.names[id], ideology::REGIMES[regime].name.to_uppercase());
+        self.say(msg);
+        true
+    }
+
+    /// setPolicy: move one slider (snapped); returns false when nothing changed.
+    pub fn set_policy(&mut self, id: usize, slider: usize, value: f32) -> bool {
+        if id == 0 || id >= self.n || slider >= ideology::SLIDERS.len() || !value.is_finite() {
+            return false;
+        }
+        let v = ideology::snap(&ideology::SLIDERS[slider], value);
+        if (self.policy[id][slider] - v).abs() < 1e-6 {
+            return false;
+        }
+        self.policy[id][slider] = v;
+        self.refresh_mods(id);
+        true
     }
 
     // ------------------------------------------------------------------ supply (CONFIG.supply)
@@ -2886,7 +2997,7 @@ impl Sim {
             let ceiling = self.max_pool[id] * scale;
             let committed = self.committed_total(id as u16);
             let throttle = MIN_OFFENSIVE_THROTTLE.max(1.0 - clamp01(committed / ceiling.max(1.0)));
-            let r_eff = self.regen_r[id] * territory_factor * capital_factor * surge * throttle;
+            let r_eff = self.regen_r[id] * territory_factor * capital_factor * surge * throttle * self.mods[id][ideology::K_MP_RATE] * self.mods[id][ideology::K_MP_CAP];
             let pool = self.manpower[id].min(ceiling);
             let rdt = r_eff * dt_days;
             let base = pool.max(ceiling.min(self.min_seed[id] * scale));
