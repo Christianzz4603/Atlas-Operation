@@ -160,6 +160,26 @@ const SUPPLY_ATTRITION_CURVE: f32 = 1.45;
 const SUPPLY_WARNING_LEVEL: f32 = 0.62;
 const SUPPLY_RESTORED_LEVEL: f32 = 0.84;
 
+// CONFIG.victoryPoints ("crowns") / CONFIG.annexation / CONFIG.ai
+const VP_START_MIN: u32 = 6;
+const VP_START_MAX: u32 = 16;
+const VP_OCCUPY_CELLS_PER_POINT: f32 = 110.0;
+const VP_BATTLE_WIN_MIN_CELLS: f32 = 45.0;
+const VP_BATTLE_HELD_MAX_CELLS: f32 = 12.0;
+const VP_BATTLE_WIN_POINTS: u32 = 2;
+const VP_KILLS_PER_POINT: f32 = 160000.0;
+const VP_MAX_POINTS: u32 = 1000;
+const ANNEX_POP_WEIGHT: f32 = 3.9;
+const ANNEX_POP_EXP: f32 = 0.6;
+const ANNEX_GDP_WEIGHT: f32 = 0.8;
+const ANNEX_GDP_EXP: f32 = 0.35;
+const ANNEX_MIN_FULL_COST: u32 = 2;
+const ANNEX_MAX_FULL_COST: u32 = 220;
+const AI_BANK_PEACE_FRAC: f32 = 0.22;
+const AI_FORCED_PEACE_LOSS: f32 = 0.8;
+const FULL_OCCUPATION_FRAC: f32 = 0.90;
+const AUTO_ANNEX_MIN_ATTACKER_FRAC: f32 = 0.20;
+
 #[derive(Clone)]
 pub struct MissileFlight {
     pub id: u32,
@@ -357,6 +377,9 @@ pub struct Front {
     pub def_supply_target: f32,
     att_supply_warned: bool,
     def_supply_warned: bool,
+    /// cells this front has taken (crowns: battle outcome)
+    vp_cells: f32,
+    vp_settled: bool,
     enc_tick: u64,
     enc_pocket: Option<Vec<usize>>,
     pub naval: Option<Naval>,
@@ -447,6 +470,12 @@ pub struct Sim {
     mods: Vec<ideology::Mods>,
     mod_money: Vec<f32>,
     mod_prod: Vec<f32>,
+    /// victory points ("crowns"): score + empire currency; progress buckets are [occupy cells, defensive kills]
+    pub crowns: Vec<u32>,
+    vp_progress: Vec<[f32; 2]>,
+    /// wars ended by treaty whose occupied land is annexed on the next step (needs the World)
+    pending_settle: Vec<(u16, u16)>,
+    pub stat_annexed: u32,
 }
 
 fn clamp01(v: f32) -> f32 {
@@ -510,6 +539,13 @@ impl Sim {
         let mods_v: Vec<ideology::Mods> = (0..n).map(|i| ideology::mods_for(ideology_v[i], &policy_v[i])).collect();
         let mod_money_v: Vec<f32> = mods_v.iter().map(|m| m[ideology::K_MONEY]).collect();
         let mod_prod_v: Vec<f32> = mods_v.iter().map(|m| m[ideology::K_PROD]).collect();
+        let crowns_v: Vec<u32> = names
+            .iter()
+            .map(|nm| {
+                let r = ideology::hash01(ideology::hash_str(&format!("{}::victoryPoints", nm)), seed);
+                (VP_START_MIN + (r * (VP_START_MAX - VP_START_MIN + 1) as f32) as u32).min(VP_START_MAX)
+            })
+            .collect();
         let mut s = Sim {
             n,
             names,
@@ -589,6 +625,10 @@ impl Sim {
             mods: mods_v,
             mod_money: mod_money_v,
             mod_prod: mod_prod_v,
+            crowns: crowns_v,
+            vp_progress: vec![[0.0; 2]; n],
+            pending_settle: Vec::new(),
+            stat_annexed: 0,
         };
         s.rebuild_adjacency(world);
         s
@@ -727,7 +767,14 @@ impl Sim {
         true
     }
 
+    /// Peace treaty: the war ends now, the occupied land each side holds is annexed on the next step.
     pub fn make_peace(&mut self, a: u16, b: u16) {
+        self.end_war(a, b);
+        self.pending_settle.push((a, b));
+    }
+
+    /// Ends the war state (flags, post-peace lock, fronts) without touching territory.
+    fn end_war(&mut self, a: u16, b: u16) {
         let (ai, bi) = (a as usize, b as usize);
         self.at_war[ai * self.n + bi] = false;
         self.at_war[bi * self.n + ai] = false;
@@ -2127,6 +2174,12 @@ impl Sim {
         self.tick += 1;
         self.time += sd;
         self.game_days += sd; // REAL_SECONDS_PER_GAME_DAY = 1
+        if !self.pending_settle.is_empty() {
+            let pend = std::mem::take(&mut self.pending_settle);
+            for (a, b) in pend {
+                self.settle_cells(a, b, false, world);
+            }
+        }
 
         self.adj_timer += sd;
         if self.adj_timer >= 1.0 {
@@ -2146,6 +2199,11 @@ impl Sim {
                 self.return_front(k);
             }
         }
+        for k in 0..self.fronts.len() {
+            if self.fronts[k].done {
+                self.credit_battle_outcome(k);
+            }
+        }
         self.fronts.retain(|f| !f.done);
         if self.tick & 63 == 0 && self.recent.len() > 4000 {
             let cut = self.tick.saturating_sub(RECAPTURE_HOLD_TICKS * 4);
@@ -2156,12 +2214,13 @@ impl Sim {
         if self.ai_timer >= AI_PASS_S {
             self.ai_timer = 0.0;
             self.ai_pass(&*world);
+            self.annex_pass(world);
         }
         self.peace_timer += sd;
         if self.peace_timer >= 2.0 {
             let t = self.peace_timer;
             self.peace_timer = 0.0;
-            self.peace_pass(t);
+            self.peace_pass(t, &*world);
         }
         self.regen(sd);
         self.update_population(sd);
@@ -2184,6 +2243,189 @@ impl Sim {
         self.tick_missiles(world);
         let now = self.time;
         self.log.retain(|(_, t)| now - *t < 30.0);
+    }
+
+    // ------------------------------------------------------------------ victory points (crowns) + annexation
+    pub fn crowns_of(&self, id: usize) -> u32 {
+        self.crowns[id]
+    }
+
+    /// _awardVictoryPoints: integer only, monotonic, clamped.
+    fn award_crowns(&mut self, id: u16, pts: u32) {
+        let i = id as usize;
+        if i == 0 || i >= self.n || pts == 0 {
+            return;
+        }
+        self.crowns[i] = (self.crowns[i] + pts).min(VP_MAX_POINTS);
+    }
+
+    /// _addVpProgress: fractional -> whole-point bank (key 0 = occupied cells, 1 = defensive kills).
+    fn add_vp_progress(&mut self, id: u16, key: usize, amount: f32, per_point: f32) {
+        let i = id as usize;
+        if i == 0 || i >= self.n || !(amount > 0.0) || !(per_point > 0.0) {
+            return;
+        }
+        let total = self.vp_progress[i][key] + amount;
+        let pts = (total / per_point).floor();
+        self.vp_progress[i][key] = total - pts * per_point;
+        if pts >= 1.0 {
+            self.award_crowns(id, pts as u32);
+        }
+    }
+
+    /// _creditOccupation: called where cells flip mid-war (frontier push and enclave mop-up).
+    fn credit_occupation(&mut self, f: &mut Front, cells: usize) {
+        if cells == 0 {
+            return;
+        }
+        f.vp_cells += cells as f32;
+        self.add_vp_progress(f.attacker, 0, cells as f32, VP_OCCUPY_CELLS_PER_POINT);
+    }
+
+    /// _creditBattleOutcome: once per front, when it ends.
+    fn credit_battle_outcome(&mut self, k: usize) {
+        if self.fronts[k].vp_settled {
+            return;
+        }
+        self.fronts[k].vp_settled = true;
+        let (a, d, cells) = (self.fronts[k].attacker, self.fronts[k].defender, self.fronts[k].vp_cells);
+        if cells >= VP_BATTLE_WIN_MIN_CELLS {
+            self.award_crowns(a, VP_BATTLE_WIN_POINTS);
+        } else if cells <= VP_BATTLE_HELD_MAX_CELLS {
+            self.award_crowns(d, VP_BATTLE_WIN_POINTS);
+        }
+    }
+
+    /// fullAnnexCost: crowns to keep an entire nation, from its own stats.
+    pub fn full_annex_cost(&self, id: usize) -> u32 {
+        let pop = self.pop_base[id].max(0.01);
+        let gdp = self.gdp[id].max(1.0);
+        let raw = ANNEX_POP_WEIGHT * pop.powf(ANNEX_POP_EXP) + ANNEX_GDP_WEIGHT * gdp.powf(ANNEX_GDP_EXP);
+        (raw.round() as u32).clamp(ANNEX_MIN_FULL_COST, ANNEX_MAX_FULL_COST)
+    }
+
+    /// annexCostCells: pro-rata price of `cells` of `loser`.
+    pub fn annex_cost_cells(&self, loser: usize, cells: u32) -> u32 {
+        if cells == 0 {
+            return 0;
+        }
+        let full = self.full_annex_cost(loser);
+        let total = self.orig_cells[loser].max(1) as f32;
+        let frac = (cells as f32 / total).clamp(0.0, 1.0);
+        ((full as f32 * frac).ceil() as u32).clamp(1, full)
+    }
+
+    fn bbox_add(bx: &mut [i32; 4], i: usize, w: usize) {
+        let (x, y) = ((i % w) as i32, (i / w) as i32);
+        bx[0] = bx[0].min(x);
+        bx[1] = bx[1].min(y);
+        bx[2] = bx[2].max(x);
+        bx[3] = bx[3].max(y);
+    }
+
+    /// settlePeace (territory part): peace keeps exactly what each side physically occupies and makes it
+    /// permanent. `auto` = full-occupation settlement: the victor also takes every cell the fallen defender
+    /// still holds (unless it is also being fought by someone else), so it vanishes instead of surviving as a strip.
+    fn settle_cells(&mut self, a: u16, b: u16, auto: bool, world: &mut World) {
+        let (ai, bi) = (a as usize, b as usize);
+        let other_war = auto && (1..self.n).any(|o| o != ai && o != bi && self.at_war[bi * self.n + o]);
+        let take_rest = auto && !other_war;
+        let mut gained_a: Vec<usize> = Vec::new();
+        let mut gained_b: Vec<usize> = Vec::new();
+        let mut rest: Vec<usize> = Vec::new();
+        {
+            let own = &world.map.owner;
+            let orig = &world.orig_owner;
+            for i in 0..own.len() {
+                let (cur, o) = (own[i], orig[i]);
+                if cur == a && o == b {
+                    gained_a.push(i);
+                } else if cur == b && o == a && !auto {
+                    gained_b.push(i);
+                } else if take_rest && cur == b {
+                    rest.push(i);
+                }
+            }
+        }
+        let w = self.w;
+        let mut bx = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for &i in &gained_a {
+            world.set_orig(i, a);
+            Self::bbox_add(&mut bx, i, w);
+        }
+        for &i in &gained_b {
+            world.set_orig(i, b);
+            Self::bbox_add(&mut bx, i, w);
+        }
+        let mut abx = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
+        for &i in &rest {
+            world.set_owner(i, a);
+            world.set_orig(i, a);
+            Self::bbox_add(&mut bx, i, w);
+            Self::bbox_add(&mut abx, i, w);
+        }
+        if !rest.is_empty() {
+            let nr = rest.len() as u32;
+            self.cells[bi] = self.cells[bi].saturating_sub(nr);
+            self.cells[ai] += nr;
+            let ab = &mut self.bbox[ai];
+            ab[0] = ab[0].min(abx[0]);
+            ab[1] = ab[1].min(abx[1]);
+            ab[2] = ab[2].max(abx[2]);
+            ab[3] = ab[3].max(abx[3]);
+        }
+        if bx[2] >= bx[0] {
+            self.dirty.push(bx);
+        }
+        let na = gained_a.len() + rest.len();
+        if na > 0 {
+            self.stat_annexed += na as u32;
+            let msg = format!("{} ANNEXED {} OCCUPIED CELLS FROM {}", self.names[ai], na, self.names[bi]);
+            self.say(msg);
+        }
+        if !gained_b.is_empty() {
+            self.stat_annexed += gained_b.len() as u32;
+            let msg = format!("{} ANNEXED {} OCCUPIED CELLS FROM {}", self.names[bi], gained_b.len(), self.names[ai]);
+            self.say(msg);
+        }
+        if take_rest {
+            let msg = format!("{} FULLY ANNEXED BY {}", self.names[bi], self.names[ai]);
+            self.say(msg);
+        }
+        if self.cells[bi] == 0 && !self.eliminated[bi] {
+            self.eliminate(b);
+        }
+    }
+
+    /// Full-occupation rule (the first part of the JS AI pass, applied to every nation at war): a country that has
+    /// lost FULL_OCCUPATION_FRAC of its original land is simply over. Every attacker holding a meaningful share
+    /// annexes its slice; if nobody clears the bar the largest holder settles.
+    fn annex_pass(&mut self, world: &mut World) {
+        let n = self.n;
+        for d in 1..n {
+            if self.eliminated[d] || !(1..n).any(|o| self.at_war[d * n + o]) {
+                continue;
+            }
+            let total = self.orig_cells[d].max(1) as f32;
+            let remaining = world.core[d] as f32;
+            if remaining > 0.0 && (total - remaining) / total < FULL_OCCUPATION_FRAC {
+                continue;
+            }
+            let shares: Vec<(usize, u32)> = (1..n).filter(|&a| self.at_war[d * n + a]).map(|a| (a, world.held(a as u16, d as u16))).collect();
+            let mut settlers: Vec<usize> = shares.iter().filter(|&&(_, c)| c as f32 / total >= AUTO_ANNEX_MIN_ATTACKER_FRAC).map(|&(a, _)| a).collect();
+            if settlers.is_empty() {
+                if let Some(&(a, _)) = shares.iter().max_by_key(|&&(_, c)| c) {
+                    settlers.push(a);
+                }
+            }
+            for a in settlers {
+                if self.eliminated[d] || !self.at_war[a * n + d] {
+                    continue;
+                }
+                self.end_war(a as u16, d as u16);
+                self.settle_cells(a as u16, d as u16, true, world);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ regimes + policy (ideology.rs)
@@ -2766,6 +3008,7 @@ impl Sim {
             return;
         }
         f.committed = (f.committed - cells.len() as f32 * cost).max(0.0);
+        self.credit_occupation(f, cells.len());
         self.apply_capture(f, cells, world);
     }
 
@@ -2821,6 +3064,7 @@ impl Sim {
             let lost = exposed_att * (1.0 - (-att_rate * dt).exp());
             f.committed = (f.committed - lost).max(0.0);
             f.push_combat_losses += lost;
+            self.add_vp_progress(f.defender, 1, lost, VP_KILLS_PER_POINT);
         }
         let naval_active = self.naval_tick(f, dt, world);
         if f.done {
@@ -2902,6 +3146,7 @@ impl Sim {
             f.dig_in = (f.dig_in - gained as f32 / def_orig * 6.0).max(0.0);
             self.note_front_advance(f, gained, def_orig);
         }
+        self.credit_occupation(f, captured.len());
         self.apply_capture(f, &captured, world);
     }
 
@@ -3118,10 +3363,38 @@ impl Sim {
         self.ai_cursor = (start + visited.max(1)) % count;
     }
 
-    fn peace_pass(&mut self, elapsed: f32) {
+    fn peace_pass(&mut self, elapsed: f32, world: &World) {
         let n = self.n;
         let mut peaces: Vec<(u16, u16)> = Vec::new();
         let mut offers: Vec<u16> = Vec::new();
+        // AI attackers cash in: they hold a worthwhile slice of an enemy and can already afford to annex it
+        for k in 0..self.fronts.len() {
+            if self.fronts[k].done {
+                continue;
+            }
+            let (a, d) = (self.fronts[k].attacker, self.fronts[k].defender);
+            if self.is_human(a) || self.eliminated[a as usize] || self.eliminated[d as usize] {
+                continue;
+            }
+            let total = self.orig_cells[d as usize].max(1) as f32;
+            let held = world.held(a, d);
+            if held == 0 || (held as f32) / total < AI_BANK_PEACE_FRAC {
+                continue;
+            }
+            if self.offer_cd[a as usize] > self.time || self.peace_offers.contains(&a) {
+                continue;
+            }
+            if self.crowns[a as usize] < self.annex_cost_cells(d as usize, held) {
+                continue;
+            }
+            if self.is_human(d) {
+                offers.push(a);
+            } else if (held as f32) / total >= AI_FORCED_PEACE_LOSS || self.ai_wants_peace(d, a) {
+                peaces.push((a, d));
+            } else {
+                self.offer_cd[a as usize] = self.time + OFFER_COOLDOWN_S;
+            }
+        }
         for f in self.fronts.iter().filter(|f| !f.done) {
             let (a, d) = (f.attacker, f.defender);
             if self.is_human(d) || !self.ai_wants_peace(d, a) {

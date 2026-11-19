@@ -308,7 +308,7 @@ impl App {
                 if let Some(pl) = &self.play {
                     let sim = &pl.sim;
                     let wars = (1..sim.n).flat_map(|a| (a + 1..sim.n).map(move |b| (a, b))).filter(|&(a, b)| sim.is_at_war(a as u16, b as u16)).count();
-                    log(&format!("autotest t={:.0}s fps={} days={:.0} fronts={} wars={}", el, get_fps(), sim.game_days, sim.fronts.len(), wars));
+                    log(&format!("autotest t={:.0}s fps={} days={:.0} fronts={} wars={} crowns={} annexed={}", el, get_fps(), sim.game_days, sim.fronts.len(), wars, sim.crowns.iter().skip(1).sum::<u32>(), sim.stat_annexed));
                 }
             }
             if el >= secs {
@@ -849,8 +849,9 @@ impl App {
         // ---- peace offers
         // ---- resource bar (resource-bar in the HTML)
         let st = pl.sim.econ.stock[pi];
-        let items: [(&str, String); 7] = [
+        let items: [(&str, String); 8] = [
             ("population", format!("{:.1}M", pl.sim.pop[pi])),
+            ("vp", format!("{}", pl.sim.crowns_of(pi))),
             ("bricks", format!("{:.0}kt", st[1])),
             ("food", format!("{:.1}kt", st[2])),
             ("money", format!("${:.1}B", st[0])),
@@ -1021,6 +1022,12 @@ impl App {
                 ("AT PEACE", c_green())
             };
             g.text(status, x0, card.y + 70.0 * u, 14.0, scol);
+            if t != p {
+                let held = pl.world.held(p, t);
+                if held > 0 {
+                    g.text(&format!("HOLDING {} CELLS - ANNEX {} CROWNS", held, pl.sim.annex_cost_cells(ti, held)), x0, card.y + 86.0 * u, 12.0, c_dim());
+                }
+            }
             let mut ry = card.y + 100.0 * u;
             let rr = card.x + card.w - 16.0 * u;
             g.text("POPULATION", x0, ry, 13.0, c_dim());

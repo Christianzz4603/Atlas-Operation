@@ -55,6 +55,11 @@ fn occupied_shade(x: i32, y: i32, base: [u8; 3]) -> [u8; 3] {
 pub struct World {
     pub map: MapData,
     pub orig_owner: Vec<u16>,
+    /// per country: cells it holds that were originally its own
+    pub core: Vec<u32>,
+    /// held[a * nc + b]: cells country `a` holds that were originally `b`'s (occupied land)
+    pub held: Vec<u32>,
+    nc: usize,
     image: Image,
     land_tex: Texture2D,
     ocean_tex: Texture2D,
@@ -74,7 +79,15 @@ impl World {
         ocean_tex.set_filter(FilterMode::Nearest);
 
         let orig_owner = map.owner.clone();
-        let mut world = World { map, orig_owner, image, land_tex, ocean_tex, tex_dirty: false };
+        let nc = map.countries.len();
+        let mut core = vec![0u32; nc];
+        for &o in map.owner.iter() {
+            if o != 0 {
+                core[o as usize] += 1;
+            }
+        }
+        let held = vec![0u32; nc * nc];
+        let mut world = World { map, orig_owner, core, held, nc, image, land_tex, ocean_tex, tex_dirty: false };
         world.repaint_all();
         Ok(world)
     }
@@ -176,8 +189,56 @@ impl World {
         self.tex_dirty = false;
     }
 
+    /// Cells `a` holds that originally belonged to `b`.
+    pub fn held(&self, a: u16, b: u16) -> u32 {
+        self.held[a as usize * self.nc + b as usize]
+    }
+
+    fn count_out(&mut self, owner: u16, orig: u16) {
+        if owner == 0 || orig == 0 {
+            return;
+        }
+        if owner == orig {
+            let c = &mut self.core[owner as usize];
+            *c = c.saturating_sub(1);
+        } else {
+            let c = &mut self.held[owner as usize * self.nc + orig as usize];
+            *c = c.saturating_sub(1);
+        }
+    }
+
+    fn count_in(&mut self, owner: u16, orig: u16) {
+        if owner == 0 || orig == 0 {
+            return;
+        }
+        if owner == orig {
+            self.core[owner as usize] += 1;
+        } else {
+            self.held[owner as usize * self.nc + orig as usize] += 1;
+        }
+    }
+
     pub fn set_owner(&mut self, i: usize, id: u16) {
+        let old = self.map.owner[i];
+        if old == id {
+            return;
+        }
+        let o = self.orig_owner[i];
+        self.count_out(old, o);
         self.map.owner[i] = id;
+        self.count_in(id, o);
+    }
+
+    /// Change who a cell originally belonged to (annexation makes occupied land permanent).
+    pub fn set_orig(&mut self, i: usize, id: u16) {
+        let o = self.orig_owner[i];
+        if o == id {
+            return;
+        }
+        let owner = self.map.owner[i];
+        self.count_out(owner, o);
+        self.orig_owner[i] = id;
+        self.count_in(owner, id);
     }
 
     /// Port of recomputeOutlineLocal / recomputeInnerLineLocal / bakeBitmapLocal for a dirty box.
