@@ -388,7 +388,7 @@ impl App {
         if g.button("Settings", Rect::new(x, y, bw, bh), "Settings", Style::Secondary, true) {
             settings = true;
         }
-        g.text_c("Atlas MiniWars - native build", sw / 2.0, sh - 14.0 * u, 13.0, c_faint());
+        g.text_c("Country Warzone - native build", sw / 2.0, sh - 14.0 * u, 13.0, c_faint());
         if go {
             self.maps_scroll = Scroll::default();
             self.screen = Screen::Maps;

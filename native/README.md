@@ -1,7 +1,7 @@
-# Atlas MiniWars - native Rust port
+# Country Warzone - native Rust port
 
 Pure native Rust (macroquad / OpenGL). No HTML, no webview, no JS.
-Source game: `miniwars.html` from Christianzz4603/Atlas-Operation.
+Ported from the original HTML game (`miniwars.html`); rebranded as Country Warzone.
 
 ## Quick start
 1. Install Rust: https://rustup.rs

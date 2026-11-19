@@ -68,7 +68,7 @@ impl Config {
 
     pub fn save(&self) {
         let text = format!(
-            "# Atlas MiniWars settings (ui_scale is changed in-game under Settings)\nwidth={}\nheight={}\nfullscreen={}\nfps_cap={}\nhigh_dpi={}\nsample_count={}\nui_scale={:.2}\n",
+            "# Country Warzone settings (ui_scale is changed in-game under Settings)\nwidth={}\nheight={}\nfullscreen={}\nfps_cap={}\nhigh_dpi={}\nsample_count={}\nui_scale={:.2}\n",
             self.width, self.height, self.fullscreen, self.fps_cap, self.high_dpi, self.sample_count, self.ui_scale
         );
         let _ = std::fs::write(data_dir().join("atlas.cfg"), text);

@@ -2,7 +2,7 @@
 name = "miniwars"
 version = "0.2.0"
 edition = "2021"
-description = "Native Rust port of Atlas MiniWars (no HTML / no webview)"
+description = "Country Warzone - native Rust strategy game (no HTML / no webview)"
 
 [dependencies]
 macroquad = "0.4"
@@ -25,7 +25,7 @@ strip = true
 # Android (cargo-quad-apk)
 [package.metadata.android]
 package_name = "com.atlas.miniwars"
-label = "Atlas MiniWars"
+label = "Country Warzone"
 version_name = "0.2.0"
 version_code = 2
 build_targets = ["aarch64-linux-android", "x86_64-linux-android"]

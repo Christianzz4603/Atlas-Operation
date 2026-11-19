@@ -32,7 +32,7 @@ fn window_conf() -> Conf {
         c.width, c.height, c.fullscreen, c.fps_cap, c.high_dpi, c.sample_count, c.ui_scale
     ));
     Conf {
-        window_title: "Atlas MiniWars".to_owned(),
+        window_title: "Country Warzone".to_owned(),
         window_width: c.width,
         window_height: c.height,
         fullscreen: c.fullscreen,

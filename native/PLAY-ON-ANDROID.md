@@ -1,4 +1,4 @@
-# Playing Atlas MiniWars (native) on Android
+# Playing Country Warzone (native) on Android
 
 ## A) Winlator (recommended) - use the *Windows-x64* download
 1. Unzip it and copy the whole folder somewhere Winlator can see (e.g. Downloads).
