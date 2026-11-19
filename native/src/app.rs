@@ -4,6 +4,7 @@ use crate::camera::MapCamera;
 use crate::config::{log, Config};
 use crate::input::Input;
 use crate::econ::{Special, CATALOG, IDX_AIRDEF, RARITY, Stock};
+use crate::ideology;
 use crate::sim::{air_defense_range, flight_pos, Sim};
 use crate::ui::*;
 use crate::world::World;
@@ -130,6 +131,18 @@ fn fmt_cost(c: &Stock) -> String {
     parts.join("  ")
 }
 
+/// "Money +10%   Production -5%" for multiplier keys from..to (rounded, no "-0").
+fn fmt_mods(m: &ideology::Mods, from: usize, to: usize) -> String {
+    (from..to)
+        .map(|k| {
+            let v = ((m[k] - 1.0) * 100.0).round();
+            let v = if v == 0.0 { 0.0 } else { v };
+            format!("{} {:+.0}%", ideology::KEY_LABELS[k], v)
+        })
+        .collect::<Vec<_>>()
+        .join("   ")
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Screen {
     Menu,
@@ -161,6 +174,8 @@ struct Play {
     missile_mode: bool,
     missile_target: Option<(i32, i32)>,
     build_open: bool,
+    regime_open: bool,
+    regime_sel: Option<usize>,
     placing: Option<usize>,
     sel_building: Option<u32>,
     overlay: Texture2D,
@@ -172,7 +187,8 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     let mut sim = Sim::new(&world, seed);
     if std::env::var("ATLAS_UITEST").is_ok() {
         // the scripted UI test needs spare materials for ports etc.
-        sim.econ.stock[nation as usize] = [200.0, 700.0, 100.0, 700.0, 50.0, 5.0];
+        sim.econ.stock[nation as usize] = [2000.0, 700.0, 100.0, 700.0, 50.0, 5.0];
+        sim.force_regime(nation as usize, 0); // liberal democracy, so the scripted switch to technocracy is legal
     }
     sim.player = Some(nation);
     sim.paused = false;
@@ -181,7 +197,7 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     sim.econ.fill_overlay(&mut img.bytes);
     let overlay = Texture2D::from_image(&img);
     overlay.set_filter(FilterMode::Nearest);
-    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, missile_mode: false, missile_target: None, build_open: false, placing: None, sel_building: None, overlay }
+    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, missile_mode: false, missile_target: None, build_open: false, regime_open: false, regime_sel: None, placing: None, sel_building: None, overlay }
 }
 
 pub struct App {
@@ -236,7 +252,7 @@ impl App {
                 "New Game", "map0", "nation:Germany", "Deploy", "BUILD", "build:farm", "place:auto", "BUILD", "build:port", "place:coast",
                 "select:neighbor", "WAR", "NAVAL", "naval:tap", "SEND", "BUILD", "build:missile-silo", "place:auto", "BUILD", "build:air-defense", "place:auto", "MISSILE", "missile:tap", "LAUNCH", "SUPPORT", "pause", "Settings", "UI+", "UI-", "Close", "Resume",
                 "speed+", "speed+", "speed-", "zoom+", "zoom-", "STOP", "PEACE", "card-close", "select:other", "ALLY", "card-close",
-                "select:building", "UPGRADE", "DISMANTLE", "bcard-close", "BUILD", "build-close", "pause", "Restart", "pause",
+                "select:building", "UPGRADE", "DISMANTLE", "bcard-close", "BUILD", "build-close", "REGIME", "regime:technocracy", "ADOPT", "pol+:1", "pol-:1", "regime-close", "pause", "Restart", "pause",
                 "Leave match", "Settings", "Close", "New Game", "back",
             ] {
                 app.gui.auto.push_back(id.to_string());
@@ -790,6 +806,14 @@ impl App {
         if g.glyph_button("zoom-", Rect::new(m, m + 2.0 * btn + 16.0 * u, btn, btn), Glyph::Minus, Style::Secondary, true) {
             pl.cam.zoom_center(1.0 / 1.6);
         }
+        if g.button("REGIME", Rect::new(m, m + 3.0 * btn + 22.0 * u, btn, btn), "GOV", Style::Secondary, true) {
+            pl.regime_open = !pl.regime_open;
+            pl.build_open = false;
+            pl.target = None;
+            pl.sel_building = None;
+            pl.naval_mode = false;
+            pl.missile_mode = false;
+        }
 
         // ---- top-right: speed
         let idx = SPEEDS.iter().position(|v| (*v - pl.sim.speed).abs() < 0.01).unwrap_or(1);
@@ -893,7 +917,7 @@ impl App {
         }
 
         // ---- news log (left) and leaderboard (right)
-        let mut ny = below.max(m + 3.0 * btn + 36.0 * u);
+        let mut ny = below.max(m + 4.0 * btn + 48.0 * u);
         for (msg, t) in pl.sim.log.iter().rev().take(5) {
             let age = pl.sim.time - *t;
             if age > 9.0 {
@@ -941,6 +965,7 @@ impl App {
         };
         if pl.placing.is_none() && g.button("BUILD", build_btn, "BUILD", Style::Primary, true) {
             pl.build_open = !pl.build_open;
+            pl.regime_open = false;
             pl.target = None;
             pl.sel_building = None;
         }
@@ -960,7 +985,7 @@ impl App {
 
         // ---- country card (bottom-left)
         let mut close_card = false;
-        if let (Some(t), false) = (pl.target, pl.build_open) {
+        if let (Some(t), false) = (pl.target, pl.build_open || pl.regime_open) {
             let ti = t as usize;
             let cw = if portrait { sw - 2.0 * m } else { (sw - sl_w - 258.0 * u - 5.0 * m).clamp(240.0 * u, 380.0 * u) };
             let chh = 296.0 * u;
@@ -1182,6 +1207,86 @@ impl App {
             }
         }
 
+        // ---- government panel (GOV): effects of the current regime, policy sliders, regime picker
+        if pl.regime_open && pl.placing.is_none() {
+            let w = (sw - 2.0 * m).min(620.0 * u);
+            let h = (sh - 2.0 * m).min(610.0 * u);
+            let r = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
+            g.panel(r, c_panel());
+            let cur = pl.sim.regime_def(pi);
+            g.text("Government", r.x + 18.0 * u, r.y + 38.0 * u, 26.0, c_text());
+            g.text_r(cur.name, r.x + r.w - 70.0 * u, r.y + 36.0 * u, 16.0, c_accent());
+            if g.glyph_button("regime-close", Rect::new(r.x + r.w - 14.0 * u - 40.0 * u, r.y + 12.0 * u, 40.0 * u, 40.0 * u), Glyph::Close, Style::Secondary, true) {
+                pl.regime_open = false;
+            }
+            let mut ry = r.y + 62.0 * u;
+            // policy sliders: -/+ step buttons keep it touch friendly
+            let pol = pl.sim.policy[pi];
+            for (k, sl) in ideology::SLIDERS.iter().enumerate() {
+                g.text_in(sl.name, Rect::new(r.x + 18.0 * u, ry, 168.0 * u, 34.0 * u), 15.0, c_text());
+                let mx = r.x + 192.0 * u;
+                let px = r.x + r.w - 18.0 * u - 34.0 * u;
+                if g.glyph_button(&format!("pol-:{}", k), Rect::new(mx, ry, 34.0 * u, 34.0 * u), Glyph::Minus, Style::Secondary, true) {
+                    pl.sim.set_policy(pi, k, pol[k] - sl.step);
+                }
+                if g.glyph_button(&format!("pol+:{}", k), Rect::new(px, ry, 34.0 * u, 34.0 * u), Glyph::Plus, Style::Secondary, true) {
+                    pl.sim.set_policy(pi, k, pol[k] + sl.step);
+                }
+                let bx = mx + 34.0 * u + 8.0 * u;
+                let bar = Rect::new(bx, ry + 9.0 * u, (px - 8.0 * u - bx).max(10.0 * u), 16.0 * u);
+                g.rrect(bar.x, bar.y, bar.w, bar.h, 8.0 * u, col(12, 16, 21));
+                let frac = ((pol[k] - sl.min) / (sl.max - sl.min).max(1.0)).clamp(0.0, 1.0);
+                if frac > 0.0 {
+                    g.rrect(bar.x, bar.y, (bar.w * frac).max(bar.h), bar.h, 8.0 * u, c_accent_dark());
+                }
+                g.text_c(&format!("{:.0}", pol[k]), bar.x + bar.w / 2.0, bar.y + bar.h - 3.0 * u, 12.0, c_text());
+                ry += 36.0 * u;
+            }
+            ry += 6.0 * u;
+            // what the current regime + sliders add up to
+            let md = pl.sim.mods_of(pi);
+            g.text(&fmt_mods(&md, 0, 4), r.x + 18.0 * u, ry + 12.0 * u, 12.0, c_dim());
+            g.text(&fmt_mods(&md, 4, ideology::NKEYS), r.x + 18.0 * u, ry + 30.0 * u, 12.0, c_dim());
+            ry += 42.0 * u;
+            // regime picker (tap to inspect, ADOPT to switch)
+            let gap = 8.0 * u;
+            let cw2 = (r.w - 36.0 * u - gap) / 2.0;
+            let rh = 34.0 * u;
+            let cur_i = pl.sim.ideology[pi];
+            let chosen = pl.regime_sel;
+            for (i, rg) in ideology::REGIMES.iter().enumerate() {
+                let rect = Rect::new(r.x + 18.0 * u + (i % 2) as f32 * (cw2 + gap), ry + (i / 2) as f32 * (rh + 4.0 * u), cw2, rh);
+                let fill = if chosen == Some(i) { c_accent_dark() } else if i == cur_i { col(40, 70, 52) } else { c_panel2() };
+                g.rrect(rect.x, rect.y, rect.w, rect.h, 9.0 * u, fill);
+                g.text_in(rg.name, rect, 14.0, if chosen == Some(i) { c_accent_ink() } else { c_text() });
+                if g.tapped(&format!("regime:{}", rg.id), rect) {
+                    pl.regime_sel = Some(i);
+                }
+            }
+            ry += 6.0 * (rh + 4.0 * u) + 6.0 * u;
+            if let Some(si) = pl.regime_sel {
+                let rg = &ideology::REGIMES[si];
+                let chk = pl.sim.can_switch_ideology(pi, si);
+                let cost = pl.sim.ideology_switch_cost(pi, si);
+                g.text(rg.name, r.x + 18.0 * u, ry + 16.0 * u, 17.0, c_text());
+                g.text(rg.blurb, r.x + 18.0 * u, ry + 34.0 * u, 12.0, c_dim());
+                g.text(&fmt_mods(&rg.mods, 0, 4), r.x + 18.0 * u, ry + 52.0 * u, 12.0, c_accent());
+                g.text(&fmt_mods(&rg.mods, 4, ideology::NKEYS), r.x + 18.0 * u, ry + 68.0 * u, 12.0, c_accent());
+                let note = match &chk {
+                    Ok(()) => format!("Cost ${:.0}B", cost),
+                    Err(e) => format!("{}  (cost ${:.0}B)", e, cost),
+                };
+                g.text(&note, r.x + 18.0 * u, ry + 86.0 * u, 12.0, if chk.is_ok() { c_green() } else { c_red() });
+                let br = Rect::new(r.x + r.w - 18.0 * u - 130.0 * u, ry + 10.0 * u, 130.0 * u, 50.0 * u);
+                if g.button("ADOPT", br, "ADOPT", Style::Primary, chk.is_ok()) {
+                    pl.sim.set_ideology(pi, si);
+                    pl.regime_sel = None;
+                }
+            } else {
+                g.text("Tap a regime to see its effects.", r.x + 18.0 * u, ry + 24.0 * u, 13.0, c_dim());
+            }
+        }
+
         // ---- building card
         let mut close_bcard = false;
         if let Some(bid) = pl.sel_building {
@@ -1287,7 +1392,7 @@ impl App {
                     }
                     Err(e) => pl.sim.say(e.to_string()),
                 }
-            } else if !pl.build_open {
+            } else if !pl.build_open && !pl.regime_open {
                 if let Some(bi) = pl.sim.econ.building_at(cx, cy) {
                     pl.sel_building = Some(pl.sim.econ.buildings[bi].id);
                     pl.target = None;

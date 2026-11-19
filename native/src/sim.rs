@@ -2253,6 +2253,16 @@ impl Sim {
         true
     }
 
+    /// Test hook (ATLAS_UITEST): install a regime without paying or waiting out the cooldown.
+    pub fn force_regime(&mut self, id: usize, regime: usize) {
+        if id == 0 || id >= self.n || regime >= ideology::REGIMES.len() {
+            return;
+        }
+        self.ideology[id] = regime;
+        self.policy[id] = ideology::regime_policy(regime);
+        self.refresh_mods(id);
+    }
+
     /// setPolicy: move one slider (snapped); returns false when nothing changed.
     pub fn set_policy(&mut self, id: usize, slider: usize, value: f32) -> bool {
         if id == 0 || id >= self.n || slider >= ideology::SLIDERS.len() || !value.is_finite() {
