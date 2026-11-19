@@ -4,7 +4,8 @@
 //!   frontPowerRatio / frontSpeedMult / effCostPerCell, _applyFrontAttrition,
 //!   _updateDefenseAllocations / _defenseComponents, _regenManpower, _buildRegenCache,
 //!   _runAiDeclarations, _aiWantsPeace, capital-fall collapse.
-//! NOT ported yet (approximated or skipped): supply, dig-in/regroup realism, focused attacks,
+//! Supply lines (CONFIG.supply flood-fill readiness + attrition) are ported below.
+//! NOT ported yet (approximated or skipped): dig-in/regroup realism extras, focused attacks,
 //! naval invasions, alliances/assists, buildings/economy, missiles/nukes, ideology/policy,
 //! empires, victory points, population sim, news feed, enclave capture.
 use crate::econ::{Econ, EconCtx};
@@ -146,6 +147,16 @@ const AIM_COUNTRY_GAP_S: f32 = 360.0;
 const AIM_SAMPLES: usize = 12;
 const AIM_BUILD: f32 = 0.0006;
 const AIM_LAUNCH: f32 = 0.004;
+
+// CONFIG.supply
+const SUPPLY_RECHECK_TICKS: u64 = 45;
+const SUPPLY_EXHAUST_DAYS: f32 = 24.0;
+const SUPPLY_RECOVER_DAYS: f32 = 12.0;
+const SUPPLY_MIN_READINESS: f32 = 0.22;
+const SUPPLY_EXTRA_DAILY_ATTRITION: f32 = 0.012;
+const SUPPLY_ATTRITION_CURVE: f32 = 1.45;
+const SUPPLY_WARNING_LEVEL: f32 = 0.62;
+const SUPPLY_RESTORED_LEVEL: f32 = 0.84;
 
 #[derive(Clone)]
 pub struct MissileFlight {
@@ -337,6 +348,13 @@ pub struct Front {
     pub regroup_work: f32,
     pub push_strain: f32,
     pub push_combat_losses: f32,
+    /// supply readiness SUPPLY_MIN_READINESS..1 per side; follows the *_target values (flood-fill supply graph)
+    pub att_supply: f32,
+    pub def_supply: f32,
+    pub att_supply_target: f32,
+    pub def_supply_target: f32,
+    att_supply_warned: bool,
+    def_supply_warned: bool,
     enc_tick: u64,
     enc_pocket: Option<Vec<usize>>,
     pub naval: Option<Naval>,
@@ -415,6 +433,11 @@ pub struct Sim {
     crisis_strength: Vec<f32>,
     /// test hook: multiplies AI missile chances (ATLAS_MISSILE_BOOST)
     missile_boost: f32,
+    /// per-nation supplied-cell masks, rebuilt every SUPPLY_RECHECK_TICKS
+    supply_reach: HashMap<u16, Vec<u8>>,
+    supply_pool: Vec<Vec<u8>>,
+    supply_queue: Vec<u32>,
+    supply_last_check: u64,
 }
 
 fn clamp01(v: f32) -> f32 {
@@ -542,6 +565,10 @@ impl Sim {
             crisis_until: vec![0.0; n],
             crisis_strength: vec![0.0; n],
             missile_boost: std::env::var("ATLAS_MISSILE_BOOST").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            supply_reach: HashMap::new(),
+            supply_pool: Vec::new(),
+            supply_queue: Vec::new(),
+            supply_last_check: u64::MAX,
         };
         s.rebuild_adjacency(world);
         s
@@ -583,9 +610,11 @@ impl Sim {
         let att_cmd = 1.0 - COMMAND_ATTACK_WEAKNESS * if self.capital_fallen[a] { 1.0 } else { 0.0 };
         let crisis = if self.game_days < self.crisis_until[d] { CRISIS_DEFENSE_WEAKNESS * self.crisis_strength[d] } else { 0.0 };
         let def_cmd = 1.0 - (COMMAND_DEFENSE_WEAKNESS * if self.capital_fallen[d] { 1.0 } else { 0.0 }).max(crisis);
-        let att = (f.committed * att_cmd).max(1.0);
+        let att_sup = f.att_supply.clamp(SUPPLY_MIN_READINESS, 1.0);
+        let def_sup = f.def_supply.clamp(SUPPLY_MIN_READINESS, 1.0);
+        let att = (f.committed * att_cmd * att_sup).max(1.0);
         let dig = 1.0 + f.dig_in.clamp(0.0, 1.0) * DIG_IN_MAX_BONUS;
-        let def = (f.def_alloc * def_cmd * dig).max(1.0);
+        let def = (f.def_alloc * def_cmd * dig * def_sup).max(1.0);
         (att / def).powf(RATIO_CURVE)
     }
 
@@ -720,6 +749,10 @@ impl Sim {
                     defender: def,
                     def_alloc: shared / (existing as f32 + 1.0) + excl,
                     collapse: self.capital_fallen[d],
+                    att_supply: 1.0,
+                    def_supply: 1.0,
+                    att_supply_target: 1.0,
+                    def_supply_target: 1.0,
                     ..Default::default()
                 };
                 self.fronts.push(f);
@@ -2073,6 +2106,7 @@ impl Sim {
             self.rebuild_adjacency(world);
         }
         self.update_defense_allocs(sd);
+        self.update_front_supply(sd, &*world);
         for k in 0..self.fronts.len() {
             if !self.fronts[k].done {
                 self.advance(k, sd, world);
@@ -2120,6 +2154,260 @@ impl Sim {
         self.tick_missiles(world);
         let now = self.time;
         self.log.retain(|(_, t)| now - *t < 30.0);
+    }
+
+    // ------------------------------------------------------------------ supply (CONFIG.supply)
+    /// _supplyReachable: the land a nation can keep supplied. Flood from the capital over continuously owned
+    /// cells (if the capital is occupied but the nation lives on, from the owned cell nearest to it). Once a
+    /// home port is reached, every other owned port is a seed too (sea supply), so islands stay connected.
+    fn compute_supply_reach(&mut self, id: usize, world: &World) -> Vec<u8> {
+        let owner = &world.map.owner;
+        let n = owner.len();
+        let mut reached = self.supply_pool.pop().unwrap_or_default();
+        if reached.len() == n {
+            for v in reached.iter_mut() {
+                *v = 0;
+            }
+        } else {
+            reached.clear();
+            reached.resize(n, 0);
+        }
+        if id == 0 || id >= self.n || self.cells[id] == 0 || self.eliminated[id] || self.capital_fallen[id] {
+            return reached;
+        }
+        let idu = id as u16;
+        let (w, h) = (self.w, self.h);
+        let mut cap = self.capital[id];
+        if cap.map_or(true, |c| owner[c] != idu) {
+            // _capitalResistanceSupplyCell: owned cell nearest to the (lost) capital
+            let lost = cap;
+            cap = None;
+            if let Some(c0) = lost {
+                let (cx, cy) = ((c0 % w) as i64, (c0 / w) as i64);
+                let b = self.bbox[id];
+                let mut best = i64::MAX;
+                for y in b[1].max(0)..=b[3].min(h as i32 - 1) {
+                    for x in b[0].max(0)..=b[2].min(w as i32 - 1) {
+                        let i = y as usize * w + x as usize;
+                        if owner[i] == idu {
+                            let (dx, dy) = (x as i64 - cx, y as i64 - cy);
+                            let d = dx * dx + dy * dy;
+                            if d < best {
+                                best = d;
+                                cap = Some(i);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let Some(cap) = cap else { return reached };
+        let mut queue = std::mem::take(&mut self.supply_queue);
+        queue.clear();
+        reached[cap] = 1;
+        queue.push(cap as u32);
+        Self::supply_flood(owner, idu, w, h, &mut reached, &mut queue);
+        let ports: Vec<usize> = self
+            .econ
+            .ports_of(&world.map, idu)
+            .into_iter()
+            .map(|i| self.econ.port_anchor(&self.econ.buildings[i]))
+            .collect();
+        if ports.iter().any(|&p| reached[p] != 0) {
+            for &p in &ports {
+                if owner[p] == idu && reached[p] == 0 {
+                    reached[p] = 1;
+                    queue.push(p as u32);
+                }
+            }
+            Self::supply_flood(owner, idu, w, h, &mut reached, &mut queue);
+        }
+        self.supply_queue = queue;
+        reached
+    }
+
+    /// 4-neighbour flood over cells owned by `idu`; `queue` holds the already-marked seeds.
+    fn supply_flood(owner: &[u16], idu: u16, w: usize, h: usize, reached: &mut [u8], queue: &mut Vec<u32>) {
+        let mut head = 0usize;
+        while head < queue.len() {
+            let i = queue[head] as usize;
+            head += 1;
+            let (x, y) = (i % w, i / w);
+            if x + 1 < w && owner[i + 1] == idu && reached[i + 1] == 0 {
+                reached[i + 1] = 1;
+                queue.push((i + 1) as u32);
+            }
+            if x > 0 && owner[i - 1] == idu && reached[i - 1] == 0 {
+                reached[i - 1] = 1;
+                queue.push((i - 1) as u32);
+            }
+            if y + 1 < h && owner[i + w] == idu && reached[i + w] == 0 {
+                reached[i + w] = 1;
+                queue.push((i + w) as u32);
+            }
+            if y > 0 && owner[i - w] == idu && reached[i - w] == 0 {
+                reached[i - w] = 1;
+                queue.push((i - w) as u32);
+            }
+        }
+        queue.clear();
+    }
+
+    /// _frontSupplyFraction: share of the active border that is connected to the nation's supply graph.
+    /// A front with no land border yet (naval force still at sea) counts as fully supplied by its transport.
+    fn front_supply_fraction(&self, f: &Front, att_side: bool, reach: &[u8], owner: &[u16]) -> f32 {
+        let (w, h) = (self.w, self.h);
+        let (own, enemy) = if att_side { (f.attacker, f.defender) } else { (f.defender, f.attacker) };
+        if own == 0 || enemy == 0 {
+            return 1.0;
+        }
+        let (mut total, mut supplied) = (0u32, 0u32);
+        if att_side {
+            let mut seen: Vec<usize> = Vec::new();
+            for &di in &f.frontier {
+                if owner[di] != f.defender {
+                    continue;
+                }
+                let (x, y) = (di % w, di / w);
+                if x + 1 < w && owner[di + 1] == own {
+                    seen.push(di + 1);
+                }
+                if x > 0 && owner[di - 1] == own {
+                    seen.push(di - 1);
+                }
+                if y + 1 < h && owner[di + w] == own {
+                    seen.push(di + w);
+                }
+                if y > 0 && owner[di - w] == own {
+                    seen.push(di - w);
+                }
+            }
+            seen.sort_unstable();
+            seen.dedup();
+            for ni in seen {
+                total += 1;
+                if reach[ni] != 0 {
+                    supplied += 1;
+                }
+            }
+        } else {
+            for &di in &f.frontier {
+                if owner[di] != f.defender {
+                    continue;
+                }
+                let (x, y) = (di % w, di / w);
+                let touches = (x + 1 < w && owner[di + 1] == enemy)
+                    || (x > 0 && owner[di - 1] == enemy)
+                    || (y + 1 < h && owner[di + w] == enemy)
+                    || (y > 0 && owner[di - w] == enemy);
+                if touches {
+                    total += 1;
+                    if reach[di] != 0 {
+                        supplied += 1;
+                    }
+                }
+            }
+        }
+        if total > 0 {
+            supplied as f32 / total as f32
+        } else {
+            1.0
+        }
+    }
+
+    fn supply_step(cur: f32, target: f32, days: f32) -> f32 {
+        let span = 1.0 - SUPPLY_MIN_READINESS;
+        let rate = span / (if target < cur { SUPPLY_EXHAUST_DAYS } else { SUPPLY_RECOVER_DAYS }).max(0.001);
+        let mv = (rate * days).max(0.0);
+        (cur + (target - cur).clamp(-mv, mv)).clamp(SUPPLY_MIN_READINESS, 1.0)
+    }
+
+    /// _updateFrontSupply: topology is re-checked every SUPPLY_RECHECK_TICKS ticks; readiness integrates every
+    /// tick in game days, and an isolated side bleeds troops allocated to that front.
+    fn update_front_supply(&mut self, days: f32, world: &World) {
+        let due = self.supply_last_check == u64::MAX
+            || self.tick < self.supply_last_check
+            || self.tick - self.supply_last_check >= SUPPLY_RECHECK_TICKS;
+        if due {
+            let old: Vec<Vec<u8>> = self.supply_reach.drain().map(|(_, v)| v).collect();
+            for v in old {
+                if self.supply_pool.len() < 8 {
+                    self.supply_pool.push(v);
+                }
+            }
+            self.supply_last_check = self.tick;
+        }
+        let owner = &world.map.owner;
+        let mut notes: Vec<String> = Vec::new();
+        for k in 0..self.fronts.len() {
+            if self.fronts[k].done {
+                continue;
+            }
+            let (a, d) = (self.fronts[k].attacker, self.fronts[k].defender);
+            if due {
+                for c in [a, d] {
+                    if !self.supply_reach.contains_key(&c) {
+                        let r = self.compute_supply_reach(c as usize, world);
+                        self.supply_reach.insert(c, r);
+                    }
+                }
+                let af = self.front_supply_fraction(&self.fronts[k], true, &self.supply_reach[&a], owner);
+                let df = self.front_supply_fraction(&self.fronts[k], false, &self.supply_reach[&d], owner);
+                let f = &mut self.fronts[k];
+                f.att_supply_target = SUPPLY_MIN_READINESS + (1.0 - SUPPLY_MIN_READINESS) * af;
+                f.def_supply_target = SUPPLY_MIN_READINESS + (1.0 - SUPPLY_MIN_READINESS) * df;
+            }
+            let (att, def, att_warn, att_ok, def_warn, def_ok) = {
+                let f = &mut self.fronts[k];
+                f.att_supply = Self::supply_step(f.att_supply, f.att_supply_target, days);
+                f.def_supply = Self::supply_step(f.def_supply, f.def_supply_target, days);
+                let (att, def) = (f.att_supply, f.def_supply);
+                let att_warn = att < SUPPLY_WARNING_LEVEL && !f.att_supply_warned;
+                let att_ok = att > SUPPLY_RESTORED_LEVEL && f.att_supply_warned;
+                let def_warn = def < SUPPLY_WARNING_LEVEL && !f.def_supply_warned;
+                let def_ok = def > SUPPLY_RESTORED_LEVEL && f.def_supply_warned;
+                if att_warn {
+                    f.att_supply_warned = true;
+                } else if att_ok {
+                    f.att_supply_warned = false;
+                }
+                if def_warn {
+                    f.def_supply_warned = true;
+                } else if def_ok {
+                    f.def_supply_warned = false;
+                }
+                (att, def, att_warn, att_ok, def_warn, def_ok)
+            };
+            let (an, dn) = (self.names[a as usize].clone(), self.names[d as usize].clone());
+            if att_warn {
+                notes.push(format!("{} SUPPLY LINE CUT - ARMY EXHAUSTING", an));
+            } else if att_ok {
+                notes.push(format!("{} SUPPLY RESTORED", an));
+            }
+            if def_warn {
+                notes.push(format!("{} SUPPLY LINE CUT - ARMY EXHAUSTING", dn));
+            } else if def_ok {
+                notes.push(format!("{} SUPPLY RESTORED", dn));
+            }
+            // isolation bleeds the troops allocated to this front, never an arbitrary share of the whole country
+            if days > 0.0 {
+                let a_rate = SUPPLY_EXTRA_DAILY_ATTRITION * (1.0 - att).powf(SUPPLY_ATTRITION_CURVE) * days;
+                if a_rate > 0.0 && self.fronts[k].committed > 0.0 {
+                    let c = self.fronts[k].committed;
+                    self.fronts[k].committed = c - c.min(c * a_rate);
+                }
+                let d_rate = SUPPLY_EXTRA_DAILY_ATTRITION * (1.0 - def).powf(SUPPLY_ATTRITION_CURVE) * days;
+                let dp = self.manpower[d as usize];
+                let alloc = self.fronts[k].def_alloc.max(0.0);
+                if d_rate > 0.0 && dp > 0.0 {
+                    let lost = dp.min(alloc * d_rate);
+                    self.manpower[d as usize] = (dp - lost).max(0.0);
+                }
+            }
+        }
+        for m in notes {
+            self.say(m);
+        }
     }
 
     fn rebuild_adjacency(&mut self, world: &World) {
@@ -2183,13 +2471,13 @@ impl Sim {
         self.fronts[k] = f;
     }
 
-    /// (resistance, casualty_share, recovery) -- _regroupLoad (supply is not ported: full supply assumed)
+    /// (resistance, casualty_share, recovery) -- _regroupLoad
     fn regroup_load(&self, f: &Front) -> (f32, f32, f32) {
         let ratio = self.power_ratio(f).max(0.001);
         let resistance = 1.0 / (1.0 + ratio / RATIO_PIVOT.max(0.001));
         let losses = f.push_combat_losses.max(0.0);
         let casualty = losses / (f.committed.max(0.0) + losses).max(1.0);
-        let supply = 1.0f32;
+        let supply = f.att_supply.clamp(SUPPLY_MIN_READINESS, 1.0);
         let recovery = REGROUP_RECOVERY_PER_SEC
             * (REGROUP_RECOVERY_FLOOR + (1.0 - REGROUP_RECOVERY_FLOOR) * supply)
             * (1.0 + REGROUP_DOMINANCE_RECOVERY_BONUS * (1.0 - resistance));
