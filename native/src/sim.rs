@@ -470,6 +470,11 @@ pub struct Sim {
     mods: Vec<ideology::Mods>,
     mod_money: Vec<f32>,
     mod_prod: Vec<f32>,
+    /// ===== empire system =====
+    pub empire: Vec<bool>,
+    pub empire_name: Vec<String>,
+    pub empire_perks: Vec<Vec<u8>>,
+    empire_ai_timer: f32,
     /// victory points ("crowns"): score + empire currency; progress buckets are [occupy cells, defensive kills]
     pub crowns: Vec<u32>,
     vp_progress: Vec<[f32; 2]>,
@@ -625,6 +630,10 @@ impl Sim {
             mods: mods_v,
             mod_money: mod_money_v,
             mod_prod: mod_prod_v,
+            empire: vec![false; n],
+            empire_name: names.iter().map(|nm| format!("{} EMPIRE", nm)).collect(),
+            empire_perks: vec![Vec::new(); n],
+            empire_ai_timer: 0.0,
             crowns: crowns_v,
             vp_progress: vec![[0.0; 2]; n],
             pending_settle: Vec::new(),
@@ -2216,6 +2225,11 @@ impl Sim {
             self.ai_pass(&*world);
             self.annex_pass(world);
         }
+        self.empire_ai_timer += sd;
+        if self.empire_ai_timer >= ideology::EMPIRE_AI_CHECK_S {
+            self.empire_ai_timer = 0.0;
+            self.empire_ai_pass(&*world);
+        }
         self.peace_timer += sd;
         if self.peace_timer >= 2.0 {
             let t = self.peace_timer;
@@ -2430,10 +2444,122 @@ impl Sim {
 
     // ------------------------------------------------------------------ regimes + policy (ideology.rs)
     fn refresh_mods(&mut self, id: usize) {
-        let m = ideology::mods_for(self.ideology[id], &self.policy[id]);
+        let mut m = ideology::mods_for(self.ideology[id], &self.policy[id]);
+        if self.empire[id] {
+            m = ideology::apply_empire_perks(m, &self.empire_perks[id]);
+        }
         self.mod_money[id] = m[ideology::K_MONEY];
         self.mod_prod[id] = m[ideology::K_PROD];
         self.mods[id] = m;
+    }
+
+    /// _spendVictoryPoints: integer crowns, all-or-nothing.
+    fn spend_crowns(&mut self, id: usize, amount: u32) -> bool {
+        if amount == 0 {
+            return true;
+        }
+        if self.crowns[id] < amount {
+            return false;
+        }
+        self.crowns[id] -= amount;
+        true
+    }
+
+    pub fn is_empire(&self, id: usize) -> bool {
+        self.empire[id]
+    }
+
+    /// canFormEmpire: same {ok,reason}-shape check as can_switch_ideology.
+    pub fn can_form_empire(&self, id: usize, world: &World) -> Result<(), String> {
+        if self.empire[id] {
+            return Err("ALREADY AN EMPIRE".to_string());
+        }
+        let vp = self.crowns[id];
+        if vp < ideology::EMPIRE_REQUIRE_VP {
+            return Err(format!("NEED {} CROWNS ({})", ideology::EMPIRE_REQUIRE_VP, vp));
+        }
+        if self.manpower[id] < ideology::EMPIRE_REQUIRE_MANPOWER {
+            return Err(format!("NEED {:.0} MANPOWER", ideology::EMPIRE_REQUIRE_MANPOWER));
+        }
+        let foreign = world.foreign_held(id as u16);
+        if foreign < ideology::EMPIRE_REQUIRE_FOREIGN_CELLS {
+            return Err(format!("NEED MORE FOREIGN LAND HELD ({}/{})", foreign, ideology::EMPIRE_REQUIRE_FOREIGN_CELLS));
+        }
+        if vp < ideology::EMPIRE_REQUIRE_VP + ideology::EMPIRE_FORM_VP_COST {
+            return Err(format!("NEED {} CROWNS TO DECLARE", ideology::EMPIRE_REQUIRE_VP + ideology::EMPIRE_FORM_VP_COST));
+        }
+        Ok(())
+    }
+
+    /// formEmpire: founds with zero free perks picked (perks are bought afterward via buy_empire_perk,
+    /// matching the shop-price path but letting the player pick deliberately rather than at a rushed
+    /// founding moment).
+    pub fn form_empire(&mut self, id: usize, world: &World) -> bool {
+        if self.can_form_empire(id, world).is_err() || !self.spend_crowns(id, ideology::EMPIRE_FORM_VP_COST) {
+            return false;
+        }
+        self.empire[id] = true;
+        self.refresh_mods(id);
+        let msg = format!("{} HAS RISEN", self.empire_name[id]);
+        self.say(msg);
+        true
+    }
+
+    fn appearance_cost(&self, id: usize) -> u32 {
+        (ideology::REPUBLIC_SAVE_BASE_COST + self.cells[id] as f32 / 300.0 * ideology::REPUBLIC_SAVE_COST_PER_300_CELLS).round() as u32
+    }
+
+    /// revertEmpire: dissolving is a real decision with a real price (double the appearance-save formula).
+    pub fn revert_empire(&mut self, id: usize) -> bool {
+        if !self.empire[id] {
+            return false;
+        }
+        let cost = self.appearance_cost(id) * 2;
+        if !self.spend_crowns(id, cost) {
+            return false;
+        }
+        self.empire[id] = false;
+        self.empire_perks[id].clear();
+        self.refresh_mods(id);
+        let msg = format!("{} REVERTED TO A REPUBLIC (-{} CROWNS)", self.names[id], cost);
+        self.say(msg);
+        true
+    }
+
+    /// buyEmpirePerk: price is always re-derived from the PERKS table, never cached, so it can't be undercut.
+    pub fn buy_empire_perk(&mut self, id: usize, perk: usize) -> bool {
+        if !self.empire[id] || perk >= ideology::PERKS.len() {
+            return false;
+        }
+        if self.empire_perks[id].contains(&(perk as u8)) || self.empire_perks[id].len() >= ideology::EMPIRE_MAX_ACTIVE_PERKS {
+            return false;
+        }
+        let def = &ideology::PERKS[perk];
+        let cost = (def.cost as f32 * ideology::EMPIRE_SHOP_PRICE_MULT).round() as u32;
+        if !self.spend_crowns(id, cost) {
+            return false;
+        }
+        self.empire_perks[id].push(perk as u8);
+        let msg = format!("{} PURCHASED {} (-{} CROWNS)", self.names[id], def.name, cost);
+        self.say(msg);
+        self.refresh_mods(id);
+        true
+    }
+
+    /// AI nations that clear the bar periodically roll to found their own empire (CONFIG.empire.AI_CHECK_INTERVAL_MS).
+    fn empire_ai_pass(&mut self, world: &World) {
+        for id in 1..self.n {
+            if self.is_human(id as u16) || self.eliminated[id] || self.empire[id] {
+                continue;
+            }
+            if self.can_form_empire(id, world).is_err() {
+                continue;
+            }
+            let r = ideology::hash01(ideology::hash_str(&format!("{}::empireRoll::{}", self.names[id], self.tick)), 0);
+            if r < ideology::EMPIRE_AI_FORM_CHANCE {
+                self.form_empire(id, world);
+            }
+        }
     }
 
     pub fn regime_def(&self, id: usize) -> &'static ideology::Regime {

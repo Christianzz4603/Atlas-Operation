@@ -27,6 +27,58 @@ pub const POLICY_NEUTRAL: f32 = 50.0;
 pub const AI_MIN: f32 = 20.0;
 pub const AI_MAX: f32 = 80.0;
 
+// ===== EMPIRE SYSTEM (CONFIG.empire) =====
+// A nation becomes an Empire only after real conquest (foreign land held) plus a crowns bankroll plus a
+// manpower floor. Perk mods stack onto the regime+policy bundle through the SAME `mods_for` pipeline (see
+// apply_empire_perks), so there is still exactly one door into the multipliers.
+pub const EMPIRE_REQUIRE_FOREIGN_CELLS: u32 = 60;
+pub const EMPIRE_REQUIRE_VP: u32 = 70;
+pub const EMPIRE_REQUIRE_MANPOWER: f32 = 40.0;
+pub const EMPIRE_FORM_VP_COST: u32 = 35;
+pub const EMPIRE_MAX_ACTIVE_PERKS: usize = 5;
+pub const EMPIRE_SHOP_PRICE_MULT: f32 = 3.5;
+pub const EMPIRE_AI_CHECK_S: f32 = 5.0;
+pub const EMPIRE_AI_FORM_CHANCE: f32 = 0.35;
+pub const REPUBLIC_SAVE_BASE_COST: f32 = 3.0;
+pub const REPUBLIC_SAVE_COST_PER_300_CELLS: f32 = 1.0;
+
+pub struct Perk {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub blurb: &'static str,
+    pub stat_key: usize,
+    pub mult: f32,
+    pub cost: u32,
+}
+
+pub const PERKS: [Perk; 14] = [
+    Perk { id: "mercantile", name: "Mercantile Charter", blurb: "Imperial trade routes swell the treasury.", stat_key: K_MONEY, mult: 1.15, cost: 20 },
+    Perk { id: "tribute", name: "Tribute System", blurb: "Subject provinces pay tribute to the crown.", stat_key: K_MONEY, mult: 1.10, cost: 14 },
+    Perk { id: "industrious", name: "Industrious Colonies", blurb: "Overseas holdings feed the factories.", stat_key: K_PROD, mult: 1.15, cost: 20 },
+    Perk { id: "workshops", name: "Imperial Workshops", blurb: "State workshops standardize output.", stat_key: K_PROD, mult: 1.10, cost: 14 },
+    Perk { id: "conscription", name: "Imperial Conscription", blurb: "Subject peoples swell the muster rolls.", stat_key: K_MP_RATE, mult: 1.15, cost: 22 },
+    Perk { id: "recruiters", name: "Colonial Recruiters", blurb: "Recruiting offices open across the provinces.", stat_key: K_MP_RATE, mult: 1.10, cost: 16 },
+    Perk { id: "levy", name: "Grand Levy", blurb: "Reserve recruitment moves faster.", stat_key: K_MP_CAP, mult: 1.18, cost: 24 },
+    Perk { id: "reserves", name: "Standing Reserves", blurb: "Reserve offices recruit faster.", stat_key: K_MP_CAP, mult: 1.10, cost: 15 },
+    Perk { id: "settlement", name: "Settlement Drive", blurb: "Resettlement swells the population.", stat_key: K_POP, mult: 1.12, cost: 16 },
+    Perk { id: "granaries", name: "Imperial Granaries", blurb: "Full granaries let families grow.", stat_key: K_POP, mult: 1.08, cost: 11 },
+    Perk { id: "legions", name: "Legion Doctrine", blurb: "Veteran legions press the offensive.", stat_key: K_ATT, mult: 1.12, cost: 26 },
+    Perk { id: "vanguard", name: "Imperial Vanguard", blurb: "Elite vanguard units spearhead every assault.", stat_key: K_ATT, mult: 1.08, cost: 17 },
+    Perk { id: "fortress", name: "Frontier Fortresses", blurb: "Border fortresses blunt every invasion.", stat_key: K_DEF, mult: 1.14, cost: 22 },
+    Perk { id: "garrisons", name: "Provincial Garrisons", blurb: "Every province keeps its own garrison.", stat_key: K_DEF, mult: 1.09, cost: 15 },
+];
+
+/// WarSim.applyEmpireMods: perks are plain multipliers on the same stat keys regime/policy already use, so
+/// stacking is always base*regime*policy*perk1*perk2 -- one order, no double-counting.
+pub fn apply_empire_perks(mut base: Mods, perks: &[u8]) -> Mods {
+    for &pid in perks {
+        if let Some(p) = PERKS.get(pid as usize) {
+            base[p.stat_key] *= p.mult;
+        }
+    }
+    base
+}
+
 pub struct Regime {
     pub id: &'static str,
     pub name: &'static str,

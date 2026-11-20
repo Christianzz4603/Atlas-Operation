@@ -194,6 +194,12 @@ impl World {
         self.held[a as usize * self.nc + b as usize]
     }
 
+    /// foreignCellsHeld: total land `a` holds that was originally someone else's.
+    pub fn foreign_held(&self, a: u16) -> u32 {
+        let i = a as usize;
+        self.held[i * self.nc..(i + 1) * self.nc].iter().sum()
+    }
+
     fn count_out(&mut self, owner: u16, orig: u16) {
         if owner == 0 || orig == 0 {
             return;

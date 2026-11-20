@@ -175,6 +175,7 @@ struct Play {
     missile_target: Option<(i32, i32)>,
     build_open: bool,
     regime_open: bool,
+    empire_open: bool,
     regime_sel: Option<usize>,
     placing: Option<usize>,
     sel_building: Option<u32>,
@@ -197,7 +198,7 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     sim.econ.fill_overlay(&mut img.bytes);
     let overlay = Texture2D::from_image(&img);
     overlay.set_filter(FilterMode::Nearest);
-    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, missile_mode: false, missile_target: None, build_open: false, regime_open: false, regime_sel: None, placing: None, sel_building: None, overlay }
+    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, missile_mode: false, missile_target: None, build_open: false, regime_open: false, regime_sel: None, empire_open: false, placing: None, sel_building: None, overlay }
 }
 
 pub struct App {
@@ -252,7 +253,7 @@ impl App {
                 "New Game", "map0", "nation:Germany", "Deploy", "BUILD", "build:farm", "place:auto", "BUILD", "build:port", "place:coast",
                 "select:neighbor", "WAR", "NAVAL", "naval:tap", "SEND", "BUILD", "build:missile-silo", "place:auto", "BUILD", "build:air-defense", "place:auto", "MISSILE", "missile:tap", "LAUNCH", "SUPPORT", "pause", "Settings", "UI+", "UI-", "Close", "Resume",
                 "speed+", "speed+", "speed-", "zoom+", "zoom-", "STOP", "PEACE", "card-close", "select:other", "ALLY", "card-close",
-                "select:building", "UPGRADE", "DISMANTLE", "bcard-close", "BUILD", "build-close", "REGIME", "regime:technocracy", "ADOPT", "pol+:1", "pol-:1", "regime-close", "pause", "Restart", "pause",
+                "select:building", "UPGRADE", "DISMANTLE", "bcard-close", "BUILD", "build-close", "REGIME", "regime:technocracy", "ADOPT", "pol+:1", "pol-:1", "regime-close", "EMPIRE_BTN", "empire-close", "pause", "Restart", "pause",
                 "Leave match", "Settings", "Close", "New Game", "back",
             ] {
                 app.gui.auto.push_back(id.to_string());
@@ -308,7 +309,7 @@ impl App {
                 if let Some(pl) = &self.play {
                     let sim = &pl.sim;
                     let wars = (1..sim.n).flat_map(|a| (a + 1..sim.n).map(move |b| (a, b))).filter(|&(a, b)| sim.is_at_war(a as u16, b as u16)).count();
-                    log(&format!("autotest t={:.0}s fps={} days={:.0} fronts={} wars={} crowns={} annexed={}", el, get_fps(), sim.game_days, sim.fronts.len(), wars, sim.crowns.iter().skip(1).sum::<u32>(), sim.stat_annexed));
+                    log(&format!("autotest t={:.0}s fps={} days={:.0} fronts={} wars={} crowns={} annexed={} empires={}", el, get_fps(), sim.game_days, sim.fronts.len(), wars, sim.crowns.iter().skip(1).sum::<u32>(), sim.stat_annexed, sim.empire.iter().filter(|&&e| e).count()));
                 }
             }
             if el >= secs {
@@ -814,6 +815,15 @@ impl App {
             pl.naval_mode = false;
             pl.missile_mode = false;
         }
+        if g.button("EMPIRE_BTN", Rect::new(m, m + 4.0 * btn + 28.0 * u, btn, btn), "EMP", Style::Secondary, true) {
+            pl.empire_open = !pl.empire_open;
+            pl.build_open = false;
+            pl.regime_open = false;
+            pl.target = None;
+            pl.sel_building = None;
+            pl.naval_mode = false;
+            pl.missile_mode = false;
+        }
 
         // ---- top-right: speed
         let idx = SPEEDS.iter().position(|v| (*v - pl.sim.speed).abs() < 0.01).unwrap_or(1);
@@ -1291,6 +1301,67 @@ impl App {
                 }
             } else {
                 g.text("Tap a regime to see its effects.", r.x + 18.0 * u, ry + 24.0 * u, 13.0, c_dim());
+            }
+        }
+
+        // ---- empire panel: eligibility / founding / perk shop
+        if pl.empire_open && pl.placing.is_none() {
+            let w = (sw - 2.0 * m).min(560.0 * u);
+            let h = (sh - 2.0 * m).min(610.0 * u);
+            let r = Rect::new((sw - w) / 2.0, (sh - h) / 2.0, w, h);
+            g.panel(r, c_panel());
+            g.text("Empire", r.x + 18.0 * u, r.y + 38.0 * u, 26.0, c_text());
+            g.text_r(&format!("{} CROWNS", pl.sim.crowns_of(pi)), r.x + r.w - 20.0 * u, r.y + 36.0 * u, 15.0, c_accent());
+            if g.glyph_button("empire-close", Rect::new(r.x + r.w - 14.0 * u - 40.0 * u, r.y + 12.0 * u, 40.0 * u, 40.0 * u), Glyph::Close, Style::Secondary, true) {
+                pl.empire_open = false;
+            }
+            let mut ry = r.y + 64.0 * u;
+            if pl.sim.is_empire(pi) {
+                g.text(&pl.sim.empire_name[pi], r.x + 18.0 * u, ry, 16.0, c_accent());
+                ry += 24.0 * u;
+                let active = pl.sim.empire_perks[pi].len();
+                g.text(&format!("{}/{} perks active", active, ideology::EMPIRE_MAX_ACTIVE_PERKS), r.x + 18.0 * u, ry, 12.0, c_dim());
+                let dr = Rect::new(r.x + r.w - 18.0 * u - 150.0 * u, ry - 18.0 * u, 150.0 * u, 34.0 * u);
+                if g.button("empire-dissolve", dr, "DISSOLVE", Style::Secondary, true) {
+                    pl.sim.revert_empire(pi);
+                }
+                ry += 16.0 * u;
+                let rh = 40.0 * u;
+                for (i, perk) in ideology::PERKS.iter().enumerate() {
+                    let rect = Rect::new(r.x + 18.0 * u, ry, r.w - 36.0 * u, rh);
+                    let owned = pl.sim.empire_perks[pi].contains(&(i as u8));
+                    g.rrect(rect.x, rect.y, rect.w, rect.h, 8.0 * u, if owned { col(40, 70, 52) } else { c_panel2() });
+                    g.text_in(&format!("{} ({}: x{:.2})", perk.name, ideology::KEY_LABELS[perk.stat_key], perk.mult), Rect::new(rect.x + 8.0 * u, rect.y, rect.w - 100.0 * u, rect.h), 12.0, c_text());
+                    if !owned {
+                        let cost = (perk.cost as f32 * ideology::EMPIRE_SHOP_PRICE_MULT).round() as u32;
+                        let affordable = pl.sim.crowns_of(pi) >= cost && active < ideology::EMPIRE_MAX_ACTIVE_PERKS;
+                        let br = Rect::new(rect.x + rect.w - 90.0 * u, rect.y + 4.0 * u, 82.0 * u, rect.h - 8.0 * u);
+                        if g.button(&format!("perk:{}", i), br, &format!("{}cr", cost), Style::Primary, affordable) {
+                            pl.sim.buy_empire_perk(pi, i);
+                        }
+                    } else {
+                        g.text_r("OWNED", rect.x + rect.w - 10.0 * u, rect.y + rect.h / 2.0 + 4.0 * u, 11.0, c_green());
+                    }
+                    ry += rh + 6.0 * u;
+                }
+            } else {
+                let chk = pl.sim.can_form_empire(pi, &pl.world);
+                g.text(&format!("Foreign land held: {}/{}", pl.world.foreign_held(pi as u16), ideology::EMPIRE_REQUIRE_FOREIGN_CELLS), r.x + 18.0 * u, ry, 13.0, c_dim());
+                ry += 22.0 * u;
+                g.text(&format!("Crowns: {}/{}", pl.sim.crowns_of(pi), ideology::EMPIRE_REQUIRE_VP + ideology::EMPIRE_FORM_VP_COST), r.x + 18.0 * u, ry, 13.0, c_dim());
+                ry += 22.0 * u;
+                g.text(&format!("Manpower: {:.0}/{:.0}", pl.sim.manpower[pi], ideology::EMPIRE_REQUIRE_MANPOWER), r.x + 18.0 * u, ry, 13.0, c_dim());
+                ry += 30.0 * u;
+                let note = match &chk {
+                    Ok(()) => format!("Ready to declare (-{} crowns)", ideology::EMPIRE_FORM_VP_COST),
+                    Err(e) => e.clone(),
+                };
+                g.text(&note, r.x + 18.0 * u, ry, 13.0, if chk.is_ok() { c_green() } else { c_red() });
+                ry += 30.0 * u;
+                let br = Rect::new(r.x + 18.0 * u, ry, 180.0 * u, 50.0 * u);
+                if g.button("empire-found", br, "FOUND EMPIRE", Style::Primary, chk.is_ok()) {
+                    pl.sim.form_empire(pi, &pl.world);
+                }
             }
         }
 
