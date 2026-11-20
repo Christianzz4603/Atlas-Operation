@@ -2341,6 +2341,125 @@ impl Sim {
     /// settlePeace (territory part): peace keeps exactly what each side physically occupies and makes it
     /// permanent. `auto` = full-occupation settlement: the victor also takes every cell the fallen defender
     /// still holds (unless it is also being fought by someone else), so it vanishes instead of surviving as a strip.
+    /// _cleanPockets: before a settlement is drawn, absorb any isolated cell of one side (or a tiny
+    /// dimple) that is effectively swallowed by the other -- an 8-neighbour majority rule, skipping
+    /// capitals, run for `passes` iterations or until nothing flips.
+    fn clean_pockets(&mut self, a: u16, b: u16, world: &mut World, passes: u32) {
+        let (gw, gh) = (world.map.w as i32, world.map.h as i32);
+        let (cap_a, cap_b) = (self.capital[a as usize], self.capital[b as usize]);
+        for _ in 0..passes {
+            let mut flips: Vec<(usize, u16)> = Vec::new();
+            for i in 0..world.map.owner.len() {
+                let cur = world.map.owner[i];
+                if cur != a && cur != b {
+                    continue;
+                }
+                if Some(i) == cap_a || Some(i) == cap_b {
+                    continue;
+                }
+                let other = if cur == a { b } else { a };
+                let (x, y) = ((i % gw as usize) as i32, (i / gw as usize) as i32);
+                let (mut same, mut opp, mut edge) = (0, 0, 0);
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let (nx, ny) = (x + dx, y + dy);
+                        if nx < 0 || ny < 0 || nx >= gw || ny >= gh {
+                            edge += 1;
+                            continue;
+                        }
+                        let v = world.map.owner[ny as usize * gw as usize + nx as usize];
+                        if v == cur {
+                            same += 1;
+                        } else if v == other {
+                            opp += 1;
+                        }
+                    }
+                }
+                if opp >= 6 && same <= 1 + edge {
+                    flips.push((i, other));
+                }
+            }
+            if flips.is_empty() {
+                break;
+            }
+            for (i, other) in flips {
+                let from = world.map.owner[i] as usize;
+                world.set_owner(i, other);
+                self.cells[from] = self.cells[from].saturating_sub(1);
+                self.cells[other as usize] += 1;
+                self.dirty.push([ (i % gw as usize) as i32, (i / gw as usize) as i32, (i % gw as usize) as i32, (i / gw as usize) as i32 ]);
+            }
+        }
+    }
+
+    /// _naturalizeBorder: the frontline a war leaves behind is a dead-straight ruler line. Erode
+    /// protrusions and roughen straight seams with deterministic noise so the settled border looks
+    /// like a negotiated historical one. Unlike clean_pockets this also moves the original owner
+    /// (set_orig), making the new line permanent rather than "occupied" land.
+    fn naturalize_border(&mut self, a: u16, b: u16, world: &mut World, passes: u32) {
+        let (gw, gh) = (world.map.w as i32, world.map.h as i32);
+        let (cap_a, cap_b) = (self.capital[a as usize], self.capital[b as usize]);
+        let seed_base = (self.tick & 0xffff_ffff) as i32;
+        for p in 0..passes {
+            let mut flips: Vec<(usize, u16)> = Vec::new();
+            for i in 0..world.map.owner.len() {
+                let cur = world.map.owner[i];
+                if cur != a && cur != b {
+                    continue;
+                }
+                if Some(i) == cap_a || Some(i) == cap_b {
+                    continue;
+                }
+                let other = if cur == a { b } else { a };
+                let (x, y) = ((i % gw as usize) as i32, (i / gw as usize) as i32);
+                let (mut same, mut opp) = (0, 0);
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dy == 0 {
+                            continue;
+                        }
+                        let (nx, ny) = (x + dx, y + dy);
+                        if nx < 0 || ny < 0 || nx >= gw || ny >= gh {
+                            continue;
+                        }
+                        let v = world.map.owner[ny as usize * gw as usize + nx as usize];
+                        if v == cur {
+                            same += 1;
+                        } else if v == other {
+                            opp += 1;
+                        }
+                    }
+                }
+                if opp == 0 {
+                    continue;
+                }
+                let h = nuke_noise(i as i32, 0, seed_base + p as i32);
+                let flip = if opp > same {
+                    h < 0.85
+                } else {
+                    opp >= 3 && same >= 4 && h < 0.30
+                };
+                if flip {
+                    flips.push((i, other));
+                }
+            }
+            if flips.is_empty() {
+                break;
+            }
+            for (i, other) in flips {
+                let from = world.map.owner[i] as usize;
+                world.set_owner(i, other);
+                world.set_orig(i, other);
+                self.cells[from] = self.cells[from].saturating_sub(1);
+                self.cells[other as usize] += 1;
+                self.dirty.push([ (i % gw as usize) as i32, (i / gw as usize) as i32, (i % gw as usize) as i32, (i / gw as usize) as i32 ]);
+            }
+        }
+    }
+
     fn settle_cells(&mut self, a: u16, b: u16, auto: bool, world: &mut World) {
         let (ai, bi) = (a as usize, b as usize);
         let other_war = auto && (1..self.n).any(|o| o != ai && o != bi && self.at_war[bi * self.n + o]);
@@ -2406,6 +2525,10 @@ impl Sim {
         if take_rest {
             let msg = format!("{} FULLY ANNEXED BY {}", self.names[bi], self.names[ai]);
             self.say(msg);
+        }
+        self.clean_pockets(a, b, world, 2);
+        if !auto {
+            self.naturalize_border(a, b, world, 2);
         }
         if self.cells[bi] == 0 && !self.eliminated[bi] {
             self.eliminate(b);
