@@ -531,6 +531,7 @@ impl Sim {
             capital[c.country as usize] = Some(c.y as usize * w + c.x as usize);
         }
         let names: Vec<String> = m.countries.iter().map(|c| c.name.to_uppercase()).collect();
+        let empire_name_v: Vec<String> = names.iter().map(|nm| format!("{} EMPIRE", nm)).collect();
         let econ = Econ::new(m, seed ^ 0x9E37_79B9);
         let pop: Vec<f32> = m.countries.iter().map(|c| c.pop).collect();
         let gdp: Vec<f32> = m.countries.iter().map(|c| c.gdp).collect();
@@ -631,7 +632,7 @@ impl Sim {
             mod_money: mod_money_v,
             mod_prod: mod_prod_v,
             empire: vec![false; n],
-            empire_name: names.iter().map(|nm| format!("{} EMPIRE", nm)).collect(),
+            empire_name: empire_name_v,
             empire_perks: vec![Vec::new(); n],
             empire_ai_timer: 0.0,
             crowns: crowns_v,
