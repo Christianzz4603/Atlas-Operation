@@ -37,14 +37,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/miniwars dist/atlas-miniwars 2>/dev/null || cp target/release/miniwars.exe dist/atlas-miniwars.exe
-          cp PLAY-ON-ANDROID.md atlas.cfg.example dist/
-          if [ "$RUNNER_OS" = "Linux" ]; then cp run-termux.sh dist/ && chmod +x dist/run-termux.sh dist/atlas-miniwars; fi
+          cp target/release/miniwars dist/country-warzone 2>/dev/null || cp target/release/miniwars.exe dist/country-warzone.exe
+          cp PLAY-ON-ANDROID.md warzone.cfg.example dist/
+          if [ "$RUNNER_OS" = "Linux" ]; then cp run-termux.sh dist/ && chmod +x dist/run-termux.sh dist/country-warzone; fi
           ls -la dist
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: atlas-miniwars-${{ matrix.name }}
+          name: country-warzone-${{ matrix.name }}
           path: native/dist
           if-no-files-found: error
 
@@ -64,12 +64,12 @@ jobs:
           mkdir -p dist
           # target/ is root-owned (built inside docker), so don't `find` it - copy the known path
           sudo chown -R "$USER" target || true
-          sudo find target -name "*.apk" -exec ls -la {} \; ; cp target/android-artifacts/debug/apk/miniwars.apk dist/atlas-miniwars.apk
+          sudo find target -name "*.apk" -exec ls -la {} \; ; cp target/android-artifacts/debug/apk/miniwars.apk dist/country-warzone.apk
           ls -la dist
       - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: atlas-miniwars-Android-apk
+          name: country-warzone-Android-apk
           path: native/dist
           if-no-files-found: error
 
@@ -80,35 +80,35 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: atlas-miniwars-Linux-x86_64
+          name: country-warzone-Linux-x86_64
           path: dist
       - name: Install runtime libs
         run: sudo apt-get update && sudo apt-get install -y xvfb libx11-6 libxi6 libxcursor1 libgl1 libgl1-mesa-dri libasound2 imagemagick
       - name: Run scripted game for 30s
         run: |
-          chmod +x dist/atlas-miniwars
+          chmod +x dist/country-warzone
           cd dist
           set +e
-          ATLAS_AUTOTEST=30 LIBGL_ALWAYS_SOFTWARE=1 timeout 120 xvfb-run -a -s "-screen 0 1280x720x24" ./atlas-miniwars
+          CW_AUTOTEST=30 LIBGL_ALWAYS_SOFTWARE=1 timeout 120 xvfb-run -a -s "-screen 0 1280x720x24" ./country-warzone
           echo "exit code: $?"
           set -e
-          echo "----- atlas-log.txt -----"
-          cat atlas-log.txt
-          grep -q "autotest done" atlas-log.txt
-          ! grep -q "PANIC" atlas-log.txt
+          echo "----- warzone-log.txt -----"
+          cat warzone-log.txt
+          grep -q "autotest done" warzone-log.txt
+          ! grep -q "PANIC" warzone-log.txt
       - name: UI walkthrough (presses every button)
         run: |
           cd dist
-          rm -f atlas-log.txt
+          rm -f warzone-log.txt
           set +e
-          ATLAS_UITEST=115 LIBGL_ALWAYS_SOFTWARE=1 timeout 200 xvfb-run -a -s "-screen 0 1280x720x24" ./atlas-miniwars
+          CW_UITEST=115 LIBGL_ALWAYS_SOFTWARE=1 timeout 200 xvfb-run -a -s "-screen 0 1280x720x24" ./country-warzone
           echo "exit code: $?"
           set -e
-          echo "----- atlas-log.txt -----"
-          cat atlas-log.txt
-          grep -q "uitest done" atlas-log.txt
-          ! grep -q "MISSING" atlas-log.txt
-          ! grep -q "PANIC" atlas-log.txt
+          echo "----- warzone-log.txt -----"
+          cat warzone-log.txt
+          grep -q "uitest done" warzone-log.txt
+          ! grep -q "MISSING" warzone-log.txt
+          ! grep -q "PANIC" warzone-log.txt
 
   smoke-android:
     name: smoke test (Android emulator)
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: atlas-miniwars-Android-apk
+          name: country-warzone-Android-apk
           path: native/dist
       - name: Enable KVM
         run: |

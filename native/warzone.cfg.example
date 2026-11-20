@@ -1,0 +1,12 @@
+# Rename this file to warzone.cfg and put it next to the game executable.
+# Lines starting with # are comments.
+
+width=1280
+height=720
+fullscreen=false
+# Frame limiter; lower it (e.g. 30) to save battery / help slow emulation. 0 = unlimited
+fps_cap=60
+# Leave false on Winlator / Wine
+high_dpi=false
+# Anti-aliasing samples (1 = off). Keep 1 on phones.
+sample_count=1

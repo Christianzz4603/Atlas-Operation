@@ -186,7 +186,7 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     let world = World::load(MAPS[map_idx].data, MAPS[map_idx].ocean).expect("failed to load map");
     let seed = (macroquad::miniquad::date::now() * 1000.0) as u32;
     let mut sim = Sim::new(&world, seed);
-    if std::env::var("ATLAS_UITEST").is_ok() {
+    if std::env::var("CW_UITEST").is_ok() {
         // the scripted UI test needs spare materials for ports etc.
         sim.econ.stock[nation as usize] = [2000.0, 700.0, 100.0, 700.0, 50.0, 5.0];
         sim.force_regime(nation as usize, 0); // liberal democracy, so the scripted switch to technocracy is legal
@@ -224,8 +224,8 @@ pub struct App {
 impl App {
     pub fn new(worlds: Vec<World>, display: Option<Font>, body: Option<Font>, logo: Option<Texture2D>, cfg: Config) -> App {
         let gui = Gui::new(display, body, logo, cfg.ui_scale);
-        let autotest = std::env::var("ATLAS_AUTOTEST").ok().and_then(|v| v.parse::<f64>().ok());
-        let uitest = std::env::var("ATLAS_UITEST").ok().and_then(|v| v.parse::<f64>().ok());
+        let autotest = std::env::var("CW_AUTOTEST").ok().and_then(|v| v.parse::<f64>().ok());
+        let uitest = std::env::var("CW_UITEST").ok().and_then(|v| v.parse::<f64>().ok());
         let mut app = App {
             gui,
             input: Input::new(),

@@ -24,7 +24,7 @@ strip = true
 
 # Android (cargo-quad-apk)
 [package.metadata.android]
-package_name = "com.atlas.miniwars"
+package_name = "com.countrywarzone.game"
 label = "Country Warzone"
 version_name = "0.2.0"
 version_code = 2

@@ -456,7 +456,7 @@ pub struct Sim {
     ai_missile_last_country: Vec<f32>,
     crisis_until: Vec<f32>,
     crisis_strength: Vec<f32>,
-    /// test hook: multiplies AI missile chances (ATLAS_MISSILE_BOOST)
+    /// test hook: multiplies AI missile chances (CW_MISSILE_BOOST)
     missile_boost: f32,
     /// per-nation supplied-cell masks, rebuilt every SUPPLY_RECHECK_TICKS
     supply_reach: HashMap<u16, Vec<u8>>,
@@ -620,7 +620,7 @@ impl Sim {
             ai_missile_last_country: vec![-1000.0; n],
             crisis_until: vec![0.0; n],
             crisis_strength: vec![0.0; n],
-            missile_boost: std::env::var("ATLAS_MISSILE_BOOST").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            missile_boost: std::env::var("CW_MISSILE_BOOST").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
             supply_reach: HashMap::new(),
             supply_pool: Vec::new(),
             supply_queue: Vec::new(),
@@ -2622,7 +2622,7 @@ impl Sim {
         true
     }
 
-    /// Test hook (ATLAS_UITEST): install a regime without paying or waiting out the cooldown.
+    /// Test hook (CW_UITEST): install a regime without paying or waiting out the cooldown.
     pub fn force_regime(&mut self, id: usize, regime: usize) {
         if id == 0 || id >= self.n || regime >= ideology::REGIMES.len() {
             return;

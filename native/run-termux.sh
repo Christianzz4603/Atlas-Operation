@@ -7,4 +7,4 @@ export DISPLAY="${DISPLAY:-:1}"
 export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
 cd "$(dirname "$0")" || exit 1
-exec ./atlas-miniwars "$@"
+exec ./country-warzone "$@"

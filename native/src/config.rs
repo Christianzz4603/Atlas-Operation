@@ -12,7 +12,7 @@ pub fn exe_dir() -> PathBuf {
 /// Where logs / settings live: next to the exe on desktop, the app's private dir on Android.
 pub fn data_dir() -> PathBuf {
     if cfg!(target_os = "android") {
-        let p = PathBuf::from("/data/data/com.atlas.miniwars/files");
+        let p = PathBuf::from("/data/data/com.countrywarzone.game/files");
         let _ = std::fs::create_dir_all(&p);
         p
     } else {
@@ -20,15 +20,16 @@ pub fn data_dir() -> PathBuf {
     }
 }
 
-/// Append a line to `atlas-log.txt` (and to logcat on Android). Never panics.
+/// Append a line to `warzone-log.txt` (and to logcat on Android). Never panics.
 pub fn log(msg: &str) {
-    macroquad::miniquad::info!("atlas: {}", msg);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("atlas-log.txt")) {
+    macroquad::miniquad::info!("warzone: {}", msg);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(data_dir().join("warzone-log.txt")) {
         let _ = writeln!(f, "{}", msg);
     }
 }
 
-/// Optional `atlas.cfg` (key=value, '#' comments) in the data dir, next to the exe, or in the cwd.
+/// Optional `warzone.cfg` (key=value, '#' comments) in the data dir, next to the exe, or in the cwd.
+/// Falls back to the old `atlas.cfg` name so settings saved by pre-rebrand builds still load.
 #[derive(Clone)]
 pub struct Config {
     pub width: i32,
@@ -43,7 +44,10 @@ pub struct Config {
 impl Config {
     pub fn load() -> Config {
         let mut c = Config { width: 1280, height: 720, fullscreen: false, fps_cap: 60, high_dpi: false, sample_count: 1, ui_scale: 1.0 };
-        let text = std::fs::read_to_string(data_dir().join("atlas.cfg"))
+        let text = std::fs::read_to_string(data_dir().join("warzone.cfg"))
+            .or_else(|_| std::fs::read_to_string(exe_dir().join("warzone.cfg")))
+            .or_else(|_| std::fs::read_to_string("warzone.cfg"))
+            .or_else(|_| std::fs::read_to_string(data_dir().join("atlas.cfg")))
             .or_else(|_| std::fs::read_to_string(exe_dir().join("atlas.cfg")))
             .or_else(|_| std::fs::read_to_string("atlas.cfg"))
             .unwrap_or_default();
@@ -71,6 +75,6 @@ impl Config {
             "# Country Warzone settings (ui_scale is changed in-game under Settings)\nwidth={}\nheight={}\nfullscreen={}\nfps_cap={}\nhigh_dpi={}\nsample_count={}\nui_scale={:.2}\n",
             self.width, self.height, self.fullscreen, self.fps_cap, self.high_dpi, self.sample_count, self.ui_scale
         );
-        let _ = std::fs::write(data_dir().join("atlas.cfg"), text);
+        let _ = std::fs::write(data_dir().join("warzone.cfg"), text);
     }
 }
