@@ -2,7 +2,7 @@
 //! Shading is a port of World._cellRGB / _bumpShade / occupiedShade / Color.* from the JS game
 //! (province patches/lines are not ported yet).
 use crate::camera::MapCamera;
-use crate::mapdata::MapData;
+use crate::mapdata::{Capital, MapData};
 use macroquad::prelude::*;
 
 const LAND_NOISE_SEED: i32 = 4261;
@@ -331,6 +331,22 @@ impl World {
             self.land_tex.update(&self.image);
             self.tex_dirty = false;
         }
+    }
+
+    /// _applyCapitalLayout (capital half): move (or create) a nation's capital marker, returning the
+    /// old and new dirty boxes so the caller can repaint both (the usual per-frame dirty-box drain
+    /// already re-stamps every capital marker that falls inside a repainted box).
+    pub fn relocate_capital(&mut self, country: u16, cx: i32, cy: i32) -> [[i32; 4]; 2] {
+        let mk = |x: i32, y: i32| [x - 1, y - 1, x + 2, y + 2];
+        let old = self.map.capitals.iter().find(|c| c.country == country).map(|c| mk(c.x as i32, c.y as i32));
+        if let Some(cap) = self.map.capitals.iter_mut().find(|c| c.country == country) {
+            cap.x = cx as u16;
+            cap.y = cy as u16;
+        } else {
+            self.map.capitals.push(Capital { country, x: cx as u16, y: cy as u16 });
+        }
+        let new_box = mk(cx, cy);
+        [old.unwrap_or(new_box), new_box]
     }
 
     pub fn owner_at(&self, cx: i32, cy: i32) -> u16 {

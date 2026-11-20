@@ -2460,6 +2460,94 @@ impl Sim {
         }
     }
 
+    /// _capitalReplacement: find the best remaining cell for a capital that fell -- the cell nearest
+    /// the centroid of the nation's largest surviving connected landmass (JS also prefers an actual
+    /// city marker in that group; the native port has no separate city-marker layer, so landmass size
+    /// + centroid distance is the whole rule here).
+    fn capital_replacement(&self, id: usize, world: &World) -> Option<(i32, i32)> {
+        let (gw, gh) = (world.map.w, world.map.h);
+        let mut labels = vec![0u32; gw * gh];
+        let mut groups: Vec<(u32, f64, f64)> = vec![(0, 0.0, 0.0)]; // (count, sum_x, sum_y)
+        let mut queue: Vec<usize> = Vec::new();
+        for start in 0..world.map.owner.len() {
+            if world.map.owner[start] as usize != id || labels[start] != 0 {
+                continue;
+            }
+            let tag = groups.len() as u32;
+            labels[start] = tag;
+            queue.clear();
+            queue.push(start);
+            let (mut head, mut sx, mut sy) = (0usize, 0f64, 0f64);
+            while head < queue.len() {
+                let i = queue[head];
+                head += 1;
+                let (x, y) = ((i % gw) as i32, (i / gw) as i32);
+                sx += x as f64;
+                sy += y as f64;
+                let mut add = |nx: i32, ny: i32, labels: &mut Vec<u32>, queue: &mut Vec<usize>| {
+                    if nx < 0 || ny < 0 || nx >= gw as i32 || ny >= gh as i32 {
+                        return;
+                    }
+                    let ni = ny as usize * gw + nx as usize;
+                    if world.map.owner[ni] as usize == id && labels[ni] == 0 {
+                        labels[ni] = tag;
+                        queue.push(ni);
+                    }
+                };
+                add(x - 1, y, &mut labels, &mut queue);
+                add(x + 1, y, &mut labels, &mut queue);
+                add(x, y - 1, &mut labels, &mut queue);
+                add(x, y + 1, &mut labels, &mut queue);
+            }
+            let n = queue.len() as u32;
+            groups.push((n, sx / n as f64, sy / n as f64));
+        }
+        let mut best: Option<(i32, i32, u32, f64)> = None; // (cx, cy, group_count, dist2)
+        for i in 0..world.map.owner.len() {
+            let tag = labels[i];
+            if tag == 0 {
+                continue;
+            }
+            let (count, gx, gy) = groups[tag as usize];
+            let (x, y) = ((i % gw) as i32, (i / gw) as i32);
+            let dist2 = (x as f64 - gx).powi(2) + (y as f64 - gy).powi(2);
+            let better = match &best {
+                None => true,
+                Some((_, _, bc, bd)) => count > *bc || (count == *bc && dist2 < *bd),
+            };
+            if better {
+                best = Some((x, y, count, dist2));
+            }
+        }
+        best.map(|(x, y, _, _)| (x, y))
+    }
+
+    /// _relocateCapitalAfterPeace: once a nation's own war(s) are all over, if its original capital
+    /// cell no longer belongs to it, move the capital marker to the best remaining cell (or drop it
+    /// entirely if the nation holds no land at all -- elimination is handled separately).
+    fn relocate_capital_after_peace(&mut self, id: usize, world: &mut World) {
+        let Some(cap) = self.capital[id] else { return };
+        if world.map.owner[cap] as usize == id {
+            return;
+        }
+        if let Some((cx, cy)) = self.capital_replacement(id, world) {
+            let i = cy as usize * world.map.w + cx as usize;
+            self.capital[id] = Some(i);
+            let boxes = world.relocate_capital(id as u16, cx, cy);
+            self.dirty.push(boxes[0]);
+            self.dirty.push(boxes[1]);
+        } else {
+            self.capital[id] = None;
+        }
+    }
+
+    fn relocate_capital_if_at_peace(&mut self, id: usize, world: &mut World) {
+        let still_at_war = (1..self.n).any(|o| o != id && self.at_war[id * self.n + o]);
+        if !still_at_war {
+            self.relocate_capital_after_peace(id, world);
+        }
+    }
+
     fn settle_cells(&mut self, a: u16, b: u16, auto: bool, world: &mut World) {
         let (ai, bi) = (a as usize, b as usize);
         let other_war = auto && (1..self.n).any(|o| o != ai && o != bi && self.at_war[bi * self.n + o]);
@@ -2530,6 +2618,8 @@ impl Sim {
         if !auto {
             self.naturalize_border(a, b, world, 2);
         }
+        self.relocate_capital_if_at_peace(ai, world);
+        self.relocate_capital_if_at_peace(bi, world);
         if self.cells[bi] == 0 && !self.eliminated[bi] {
             self.eliminate(b);
         }
