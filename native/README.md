@@ -17,12 +17,14 @@ Controls: drag / WASD pan, wheel / pinch / Q,E zoom, Space pause, +/- speed butt
 | 1. Extract assets + bake maps (`tools/bake.py`) | done (250 assets, 2 maps, country stats) |
 | 2. Renderer, camera, hover | written, not compiled yet |
 | 3a. Core war sim (manpower, fronts, capture, capital fall, AI wars + peace) | written, not compiled yet |
-| 3b. Provinces, buildings/economy, supply, focused attacks, naval, alliances, nukes | todo |
+| 3b. Provinces, buildings/economy, supply, naval, alliances, nukes | todo |
 | 3c. Supply lines (flood-fill readiness, exhaustion/recovery, per-front attrition) | done (CI green) |
 | 3d. Regimes + policy sliders (12 regimes, 4 sliders, switch cost/cooldown, AI start rolls; feeds combat/pop/manpower/money/production) | done: sim + Government panel (GOV button) |
 | 3e. Victory points (crowns) + annexation (occupation/battle/kill credit, peace-time territory settlement, full-occupation annex pass, AI bank-peace) | done (CI green) |
 | 3f. Empire system (foreign-land/crowns/manpower founding gate, 14 perks feeding the regime/policy mod pipeline, AI auto-founding roll) | done: sim + Empire panel (EMP button) |
-| 4. Full UI (menus, focused attacks, leaderboard details) | todo |
+| 3g. Focused attacks (frontier-cell targeting, power-ratio effectiveness, cooldown, cell-budget surge) | done (CI green) |
+| 3h. Peace-time territory settlement: pocket cleanup, border naturalization, capital relocation to a nation's largest surviving landmass | done (CI green) |
+| 4. Full UI (menus, leaderboard details) | todo |
 | 5. Audio | todo |
 | 6. Multiplayer (replace PeerJS) | todo |
 
