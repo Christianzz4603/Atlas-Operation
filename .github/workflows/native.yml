@@ -84,6 +84,19 @@ jobs:
           path: dist
       - name: Install runtime libs
         run: sudo apt-get update && sudo apt-get install -y xvfb libx11-6 libxi6 libxcursor1 libgl1 libgl1-mesa-dri libasound2 imagemagick
+      - name: Configure dummy ALSA device
+        # the runner has no real sound card; quad-snd's ALSA backend panics (process abort, not a
+        # catchable error) if it can't open *any* PCM device at engine start, so point ALSA at the
+        # null PCM/ctl plugin instead of letting it try to enumerate a real card.
+        run: |
+          cat > ~/.asoundrc <<'ASOUNDRC'
+          pcm.!default {
+              type null
+          }
+          ctl.!default {
+              type null
+          }
+          ASOUNDRC
       - name: Run scripted game for 30s
         run: |
           chmod +x dist/country-warzone
