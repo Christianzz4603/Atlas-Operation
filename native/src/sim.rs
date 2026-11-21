@@ -160,6 +160,17 @@ const SUPPLY_ATTRITION_CURVE: f32 = 1.45;
 const SUPPLY_WARNING_LEVEL: f32 = 0.62;
 const SUPPLY_RESTORED_LEVEL: f32 = 0.84;
 
+// CONFIG.focusedAttack (simplified: one direct speed multiplier + a frontage-biased pick, instead of
+// the JS pressure-field/sector-density/capital-resistance system and its icon/flag animation)
+const FOCUS_ACTIVE_S: f32 = 3.0;
+const FOCUS_COOLDOWN_S: f32 = 2.0;
+const FOCUS_EFFECT_RATIO_LOW: f32 = 0.72;
+const FOCUS_EFFECT_RATIO_HIGH: f32 = 1.55;
+const FOCUS_EFFECT_MIN: f32 = 0.65;
+const FOCUS_MAX_MULT: f32 = 1.5;
+const FOCUS_SURGE_FRONT_SCALE: f32 = 0.3;
+const FOCUS_SURGE_MAX_CELLS: f32 = 5.0;
+
 // CONFIG.victoryPoints ("crowns") / CONFIG.annexation / CONFIG.ai
 const VP_START_MIN: u32 = 6;
 const VP_START_MAX: u32 = 16;
@@ -384,6 +395,11 @@ pub struct Front {
     enc_pocket: Option<Vec<usize>>,
     pub naval: Option<Naval>,
     naval_replan_at: f32,
+    /// ===== focused attack (simplified): player-aimed concentration on one frontier cell =====
+    pub focus_cell: Option<usize>,
+    focus_until: f32,
+    focus_cooldown_until: f32,
+    focus_mult: f32,
 }
 
 pub struct Sim {
@@ -3434,8 +3450,13 @@ impl Sim {
             f.done = true;
             return;
         }
+        if f.focus_cell.is_some() && self.time >= f.focus_until {
+            f.focus_cell = None;
+            f.focus_mult = 1.0;
+        }
         let speed = self.speed_mult(f);
-        f.cell_budget += FRONT_CELLS_PER_SEC * dt * speed;
+        let focus_mult = if f.focus_cell.is_some() { f.focus_mult } else { 1.0 };
+        f.cell_budget += FRONT_CELLS_PER_SEC * dt * speed * focus_mult;
         let take = f.cell_budget.floor().min(cap) as usize;
         f.cell_budget -= take as f32;
 
@@ -3473,6 +3494,8 @@ impl Sim {
         }
         let captured: Vec<usize> = if elig.len() <= MIN_REMNANT_CELLS || take >= elig.len() {
             elig
+        } else if let Some(anchor) = f.focus_cell {
+            self.pick_cells_near(&elig, take, anchor)
         } else {
             let seeds = if speed > 2.2 { 2 } else { 1 };
             self.pick_cells(&elig, take, seeds)
@@ -3488,6 +3511,64 @@ impl Sim {
         }
         self.credit_occupation(f, captured.len());
         self.apply_capture(f, &captured, world);
+    }
+
+    /// focusFront (simplified): a human attacker aims a short-lived push at one frontier cell. Raises
+    /// the front's capture rate for FOCUS_ACTIVE_S and biases which cells get taken toward that spot,
+    /// instead of the usual random-seed blob. Effectiveness scales with current combat strength (a
+    /// weak attack still has to pass the normal superiority check and gains little from focusing).
+    /// Not ported: the JS pressure-field sector geometry, capital-adjacent resistance/adaptation, the
+    /// mirrored opposing-front defense response, and the animated flag/icon overlay.
+    pub fn focus_front(&mut self, attacker: u16, defender: u16, cell: usize, world: &World) -> bool {
+        if !self.is_human(attacker) {
+            return false;
+        }
+        let Some(k) = self.fronts.iter().position(|f| f.attacker == attacker && f.defender == defender && !f.done) else {
+            return false;
+        };
+        if self.time < self.fronts[k].focus_cooldown_until {
+            return false;
+        }
+        if world.map.owner[cell] != defender || !self.fronts[k].frontier.contains(&cell) {
+            return false;
+        }
+        let ratio = self.power_ratio(&self.fronts[k]);
+        let ratio_t = clamp01((ratio - FOCUS_EFFECT_RATIO_LOW) / (FOCUS_EFFECT_RATIO_HIGH - FOCUS_EFFECT_RATIO_LOW).max(0.001));
+        let effectiveness = FOCUS_EFFECT_MIN + (1.0 - FOCUS_EFFECT_MIN) * ratio_t;
+        let frontier_len = self.fronts[k].frontier.len();
+        let surge = (((frontier_len as f32).sqrt() * FOCUS_SURGE_FRONT_SCALE * effectiveness).round()).min(FOCUS_SURGE_MAX_CELLS).max(0.0);
+        let f = &mut self.fronts[k];
+        f.focus_cell = Some(cell);
+        f.focus_until = self.time + FOCUS_ACTIVE_S;
+        f.focus_cooldown_until = self.time + FOCUS_COOLDOWN_S;
+        f.focus_mult = 1.0 + (FOCUS_MAX_MULT - 1.0) * effectiveness;
+        f.cell_budget += surge;
+        true
+    }
+
+    /// Bite a blob of `take` cells closest to a fixed anchor (the focus target), rather than a random seed.
+    fn pick_cells_near(&self, frontier: &[usize], take: usize, anchor: usize) -> Vec<usize> {
+        let w = self.w;
+        let (ax, ay) = ((anchor % w) as i32, (anchor / w) as i32);
+        let mut v: Vec<(i32, usize)> = frontier
+            .iter()
+            .map(|&c| {
+                let dx = (c % w) as i32 - ax;
+                let dy = (c / w) as i32 - ay;
+                (dx * dx + dy * dy, c)
+            })
+            .collect();
+        let m = take.min(v.len());
+        if m == 0 {
+            return Vec::new();
+        }
+        if m < v.len() {
+            v.select_nth_unstable_by_key(m - 1, |e| e.0);
+            v.truncate(m);
+        }
+        let mut chosen: Vec<usize> = v.into_iter().map(|e| e.1).collect();
+        chosen.sort_unstable();
+        chosen
     }
 
     /// Bite a blob (or two) out of the frontier: the `take` cells closest to random seeds.

@@ -172,6 +172,7 @@ struct Play {
     naval_cell: Option<usize>,
     naval_boats: u32,
     missile_mode: bool,
+    focus_mode: bool,
     missile_target: Option<(i32, i32)>,
     build_open: bool,
     regime_open: bool,
@@ -198,7 +199,7 @@ fn make_play(map_idx: usize, nation: u16) -> Play {
     sim.econ.fill_overlay(&mut img.bytes);
     let overlay = Texture2D::from_image(&img);
     overlay.set_filter(FilterMode::Nearest);
-    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, missile_mode: false, missile_target: None, build_open: false, regime_open: false, regime_sel: None, empire_open: false, placing: None, sel_building: None, overlay }
+    Play { world, sim, cam, map_idx, nation, target: None, send_frac: 0.25, slider_drag: false, menu_open: false, last_view: Vec2::ZERO, naval_mode: false, naval_cell: None, naval_boats: 3, missile_mode: false, missile_target: None, focus_mode: false, build_open: false, regime_open: false, regime_sel: None, empire_open: false, placing: None, sel_building: None, overlay }
 }
 
 pub struct App {
@@ -1064,7 +1065,7 @@ impl App {
             let amount = (pl.send_frac * pl.sim.manpower[pi]).floor();
             if t != p && !pl.sim.eliminated[ti] {
                 if at_war {
-                    let bw = (bw_all - 24.0 * u) / 4.0;
+                    let bw = (bw_all - 32.0 * u) / 5.0;
                     if g.button("SUPPORT", Rect::new(x0, by, bw, 48.0 * u), "SUPPORT", Style::Primary, avail > 0.0) {
                         pl.sim.commit(p, t, amount);
                     }
@@ -1073,10 +1074,13 @@ impl App {
                         pl.naval_cell = None;
                         pl.naval_boats = pl.naval_boats.clamp(1, pl.sim.naval_max_boats(p).max(1));
                     }
-                    if g.button("STOP", Rect::new(x0 + 2.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "STOP", Style::Secondary, true) {
+                    if g.button("FOCUS", Rect::new(x0 + 2.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "FOCUS", Style::Secondary, true) {
+                        pl.focus_mode = true;
+                    }
+                    if g.button("STOP", Rect::new(x0 + 3.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "STOP", Style::Secondary, true) {
                         pl.sim.stop_attack(p, t);
                     }
-                    if g.button("PEACE", Rect::new(x0 + 3.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "PEACE", Style::Secondary, true) {
+                    if g.button("PEACE", Rect::new(x0 + 4.0 * (bw + 8.0 * u), by, bw, 48.0 * u), "PEACE", Style::Secondary, true) {
                         pl.sim.propose_peace(p, t);
                     }
                 } else if pl.sim.are_allies(p, t) {
@@ -1139,6 +1143,23 @@ impl App {
                 pl.missile_target = None;
             }
             below += 110.0 * u;
+        }
+
+        // ---- focused-attack targeting banner
+        if pl.focus_mode {
+            if let Some(t) = pl.target {
+                let w = (sw - 2.0 * m).min(520.0 * u);
+                let r = Rect::new((sw - w) / 2.0, below, w, 66.0 * u);
+                g.panel(r, c_panel());
+                g.text(&format!("Tap a frontier cell inside {} to focus the push", pl.sim.names[t as usize]), r.x + 16.0 * u, r.y + 28.0 * u, 16.0, c_text());
+                g.text("Short, concentrated push; cooldown between orders", r.x + 16.0 * u, r.y + 50.0 * u, 13.0, c_accent());
+                if g.button("focus-cancel-mode", Rect::new(r.x + r.w - 16.0 * u - 110.0 * u, r.y + 10.0 * u, 110.0 * u, 46.0 * u), "Cancel", Style::Secondary, true) {
+                    pl.focus_mode = false;
+                }
+            } else {
+                pl.focus_mode = false;
+            }
+            below += 76.0 * u;
         }
 
         // ---- naval targeting banner + invasion panel
@@ -1447,6 +1468,18 @@ impl App {
                 let (mw, mh) = (pl.world.map.w as i32, pl.world.map.h as i32);
                 if cx >= 0 && cy >= 0 && cx < mw && cy < mh && pl.world.map.land[(cy * mw + cx) as usize] == 1 {
                     pl.missile_target = Some((cx, cy));
+                }
+            } else if pl.focus_mode {
+                if let Some(t) = pl.target {
+                    let (mw, mh) = (pl.world.map.w as i32, pl.world.map.h as i32);
+                    if cx >= 0 && cy >= 0 && cx < mw && cy < mh {
+                        let cell = (cy * mw + cx) as usize;
+                        if pl.sim.focus_front(p, t, cell, &pl.world) {
+                            pl.focus_mode = false;
+                        } else {
+                            pl.sim.say("CAN'T FOCUS THERE".to_string());
+                        }
+                    }
                 }
             } else if pl.naval_mode {
                 if let Some(t) = pl.target {
