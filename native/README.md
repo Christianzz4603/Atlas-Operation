@@ -25,7 +25,7 @@ Controls: drag / WASD pan, wheel / pinch / Q,E zoom, Space pause, +/- speed butt
 | 3g. Focused attacks (frontier-cell targeting, power-ratio effectiveness, cooldown, cell-budget surge) | done (CI green) |
 | 3h. Peace-time territory settlement: pocket cleanup, border naturalization, capital relocation to a nation's largest surviving landmass | done (CI green) |
 | 4. Full UI (menus, leaderboard details) | todo |
-| 5. Audio | scaffolded (CI green): hook points wired for war/peace/battle/capital/empire/crown/focus events + UI clicks; silent until .ogg files are dropped in `native/assets/audio/` (see that folder's notes) |
+| 5. Audio | done (CI green): hook points wired for war/peace/battle/capital/empire/crown/focus events + UI clicks + looped music; silent until .ogg files are dropped in `native/assets/audio/` (see that folder's notes) |
 | 6. Multiplayer (replace PeerJS) | todo |
 
 Sim formulas/constants are the originals from `WarSim` (power ratio, speed, cost per cell, attrition,
