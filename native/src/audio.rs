@@ -78,6 +78,13 @@ impl Audio {
     /// Kick off every load at startup. Safe to call even when `assets/audio/` doesn't exist at all --
     /// a missing folder just means every load fails, is caught, and the game runs silently.
     pub async fn load_all(&mut self) {
+        // Some headless/CI environments (and some stripped-down Linux installs) have no working
+        // ALSA/audio device at all; quad-snd's backend init panics in that case rather than
+        // returning an error, so we never touch it there. Set CW_NO_AUDIO=1 to opt out up front.
+        if std::env::var("CW_NO_AUDIO").is_ok() {
+            log("audio: disabled via CW_NO_AUDIO env var, skipping all loads");
+            return;
+        }
         let mut missing = 0u32;
         for s in Sfx::ALL {
             let path = format!("{}/{}", SFX_DIR, s.file());

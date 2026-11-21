@@ -89,7 +89,7 @@ jobs:
           chmod +x dist/country-warzone
           cd dist
           set +e
-          CW_AUTOTEST=30 LIBGL_ALWAYS_SOFTWARE=1 timeout 120 xvfb-run -a -s "-screen 0 1280x720x24" ./country-warzone
+          CW_NO_AUDIO=1 CW_AUTOTEST=30 LIBGL_ALWAYS_SOFTWARE=1 timeout 120 xvfb-run -a -s "-screen 0 1280x720x24" ./country-warzone
           echo "exit code: $?"
           set -e
           echo "----- warzone-log.txt -----"
@@ -101,7 +101,7 @@ jobs:
           cd dist
           rm -f warzone-log.txt
           set +e
-          CW_UITEST=115 LIBGL_ALWAYS_SOFTWARE=1 timeout 200 xvfb-run -a -s "-screen 0 1280x720x24" ./country-warzone
+          CW_NO_AUDIO=1 CW_UITEST=115 LIBGL_ALWAYS_SOFTWARE=1 timeout 200 xvfb-run -a -s "-screen 0 1280x720x24" ./country-warzone
           echo "exit code: $?"
           set -e
           echo "----- warzone-log.txt -----"
