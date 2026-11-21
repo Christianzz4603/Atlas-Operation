@@ -12,7 +12,7 @@ pub fn exe_dir() -> PathBuf {
 /// Where logs / settings live: next to the exe on desktop, the app's private dir on Android.
 pub fn data_dir() -> PathBuf {
     if cfg!(target_os = "android") {
-        let p = PathBuf::from("/data/data/com.countrywarzone.game/files");
+        let p = PathBuf::from("/data/data/com.countrywarzone.miniwars/files");
         let _ = std::fs::create_dir_all(&p);
         p
     } else {

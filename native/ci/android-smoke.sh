@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installs the APK on the emulator, launches it, and prints whatever helps explain a crash.
 APK=dist/country-warzone.apk
-PKG=com.countrywarzone.game
+PKG=com.countrywarzone.miniwars
 adb install -r "$APK" || { echo "INSTALL FAILED"; exit 1; }
 adb logcat -c
 adb shell monkey -p $PKG -c android.intent.category.LAUNCHER 1
