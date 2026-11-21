@@ -324,6 +324,22 @@ pub struct Assist {
     pub target: u16,
     pub created: f32,
 }
+
+/// Audio hook tags pushed during the sim step; app.rs drains `Sim::sfx_queue` each frame and maps
+/// each tag to an `audio::Sfx`, so sim.rs stays free of any macroquad/audio dependency.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SfxEvent {
+    WarDeclared,
+    PeaceMade,
+    BattleWon,
+    BattleLost,
+    CapitalFallen,
+    CapitalRecaptured,
+    NationEliminated,
+    EmpireFounded,
+    CrownAwarded,
+    FocusAttack,
+}
 // CONFIG.war (realism / mop-up)
 const RECAPTURE_HOLD_TICKS: u64 = 3;
 const MOPUP_MULT: f32 = 2.0;
@@ -454,6 +470,7 @@ pub struct Sim {
     bbox: Vec<[i32; 4]>,
     pub dirty: Vec<[i32; 4]>,
     pub log: Vec<(String, f32)>,
+    pub sfx_queue: Vec<SfxEvent>,
     recent: HashMap<usize, u64>,
     enc_seen: Vec<u32>,
     enc_epoch: u32,
@@ -618,6 +635,7 @@ impl Sim {
             bbox,
             dirty: Vec::new(),
             log: Vec::new(),
+            sfx_queue: Vec::new(),
             recent: HashMap::new(),
             enc_seen: vec![0; w * h],
             enc_epoch: 0,
@@ -786,6 +804,9 @@ impl Sim {
         self.peace_offers.retain(|&x| x != a && x != b);
         let msg = format!("{} DECLARES WAR ON {}", self.names[ai], self.names[bi]);
         self.say(msg);
+        if self.is_human(a) || self.is_human(b) {
+            self.sfx_queue.push(SfxEvent::WarDeclared);
+        }
         self.offer_war_assist(a, b);
         if self.is_human(a) && !self.is_human(b) {
             self.ai_commit(b, a, true); // _aiRetaliate
@@ -795,6 +816,9 @@ impl Sim {
 
     /// Peace treaty: the war ends now, the occupied land each side holds is annexed on the next step.
     pub fn make_peace(&mut self, a: u16, b: u16) {
+        if self.is_human(a) || self.is_human(b) {
+            self.sfx_queue.push(SfxEvent::PeaceMade);
+        }
         self.end_war(a, b);
         self.pending_settle.push((a, b));
     }
@@ -2288,6 +2312,9 @@ impl Sim {
             return;
         }
         self.crowns[i] = (self.crowns[i] + pts).min(VP_MAX_POINTS);
+        if self.is_human(id) {
+            self.sfx_queue.push(SfxEvent::CrownAwarded);
+        }
     }
 
     /// _addVpProgress: fractional -> whole-point bank (key 0 = occupied cells, 1 = defensive kills).
@@ -2322,8 +2349,18 @@ impl Sim {
         let (a, d, cells) = (self.fronts[k].attacker, self.fronts[k].defender, self.fronts[k].vp_cells);
         if cells >= VP_BATTLE_WIN_MIN_CELLS {
             self.award_crowns(a, VP_BATTLE_WIN_POINTS);
+            if self.is_human(a) {
+                self.sfx_queue.push(SfxEvent::BattleWon);
+            } else if self.is_human(d) {
+                self.sfx_queue.push(SfxEvent::BattleLost);
+            }
         } else if cells <= VP_BATTLE_HELD_MAX_CELLS {
             self.award_crowns(d, VP_BATTLE_WIN_POINTS);
+            if self.is_human(d) {
+                self.sfx_queue.push(SfxEvent::BattleWon);
+            } else if self.is_human(a) {
+                self.sfx_queue.push(SfxEvent::BattleLost);
+            }
         }
     }
 
@@ -2732,6 +2769,9 @@ impl Sim {
         self.refresh_mods(id);
         let msg = format!("{} HAS RISEN", self.empire_name[id]);
         self.say(msg);
+        if self.is_human(id as u16) {
+            self.sfx_queue.push(SfxEvent::EmpireFounded);
+        }
         true
     }
 
@@ -3543,6 +3583,7 @@ impl Sim {
         f.focus_cooldown_until = self.time + FOCUS_COOLDOWN_S;
         f.focus_mult = 1.0 + (FOCUS_MAX_MULT - 1.0) * effectiveness;
         f.cell_budget += surge;
+        self.sfx_queue.push(SfxEvent::FocusAttack);
         true
     }
 
@@ -3618,6 +3659,7 @@ impl Sim {
         self.peace_offers.retain(|&x| x != id);
         let msg = format!("{} HAS BEEN ELIMINATED", self.names[i]);
         self.say(msg);
+        self.sfx_queue.push(SfxEvent::NationEliminated);
     }
 
     fn check_capitals(&mut self, world: &World) {
@@ -3635,6 +3677,9 @@ impl Sim {
                             f.collapse = false;
                         }
                     }
+                    if self.is_human(id as u16) {
+                        self.sfx_queue.push(SfxEvent::CapitalRecaptured);
+                    }
                 }
             } else if !self.capital_fallen[id] && holder != 0 && self.at_war[id * self.n + holder] {
                 self.capital_fallen[id] = true;
@@ -3646,6 +3691,9 @@ impl Sim {
                 }
                 let msg = format!("THE CAPITAL OF {} HAS FALLEN", self.names[id]);
                 self.say(msg);
+                if self.is_human(id as u16) {
+                    self.sfx_queue.push(SfxEvent::CapitalFallen);
+                }
             }
         }
     }

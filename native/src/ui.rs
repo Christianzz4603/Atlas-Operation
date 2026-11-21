@@ -63,6 +63,8 @@ pub struct Gui {
     pub enabled: bool,
     /// a widget already took this frame's tap
     pub consumed: bool,
+    /// set for one frame whenever a button press is consumed; app.rs drains it to play a UI click sound
+    pub click_sound_pending: bool,
     blocks: Vec<Rect>,
     blocks_prev: Vec<Rect>,
     flags: HashMap<String, Option<Texture2D>>,
@@ -85,6 +87,7 @@ impl Gui {
             ptr: Pointer::default(),
             enabled: true,
             consumed: false,
+            click_sound_pending: false,
             blocks: Vec::new(),
             blocks_prev: Vec::new(),
             flags: HashMap::new(),
@@ -247,6 +250,7 @@ impl Gui {
         }
         if clicked {
             self.consumed = true;
+            self.click_sound_pending = true;
         }
         (clicked, pressed)
     }

@@ -5,7 +5,7 @@ edition = "2021"
 description = "Country Warzone - native Rust strategy game (no HTML / no webview)"
 
 [dependencies]
-macroquad = "0.4"
+macroquad = { version = "0.4", features = ["audio"] }
 miniz_oxide = "0.8"
 
 [profile.dev]

@@ -6,6 +6,7 @@ use crate::input::Input;
 use crate::econ::{Special, CATALOG, IDX_AIRDEF, RARITY, Stock};
 use crate::ideology;
 use crate::sim::{air_defense_range, flight_pos, Sim};
+use crate::audio::{Audio, Sfx};
 use crate::ui::*;
 use crate::world::World;
 use macroquad::prelude::*;
@@ -215,6 +216,7 @@ pub struct App {
     maps_scroll: Scroll,
     settings_open: bool,
     play: Option<Play>,
+    pub audio: Audio,
     // CI self tests
     autotest: Option<f64>,
     uitest: Option<f64>,
@@ -240,6 +242,7 @@ impl App {
             maps_scroll: Scroll::default(),
             settings_open: false,
             play: None,
+            audio: Audio::new(),
             autotest,
             uitest,
             t0: get_time(),
@@ -299,6 +302,10 @@ impl App {
             self.settings_modal();
         }
         self.gui.end();
+        if self.gui.click_sound_pending {
+            self.gui.click_sound_pending = false;
+            self.audio.play(Sfx::UiClick);
+        }
         self.selftest_tick();
     }
 
@@ -597,6 +604,9 @@ impl App {
         }
         pl.sim.paused = pl.menu_open;
         pl.sim.step(dt, &mut pl.world);
+        for e in pl.sim.sfx_queue.drain(..) {
+            self.audio.play(sfx_for_event(e));
+        }
         for b in pl.sim.dirty.drain(..) {
             pl.world.refresh_box(b);
         }
@@ -1564,5 +1574,21 @@ impl App {
             }
         }
         action
+    }
+}
+
+fn sfx_for_event(e: crate::sim::SfxEvent) -> Sfx {
+    use crate::sim::SfxEvent as E;
+    match e {
+        E::WarDeclared => Sfx::WarDeclared,
+        E::PeaceMade => Sfx::PeaceMade,
+        E::BattleWon => Sfx::BattleWon,
+        E::BattleLost => Sfx::BattleLost,
+        E::CapitalFallen => Sfx::CapitalFallen,
+        E::CapitalRecaptured => Sfx::CapitalRecaptured,
+        E::NationEliminated => Sfx::NationEliminated,
+        E::EmpireFounded => Sfx::EmpireFounded,
+        E::CrownAwarded => Sfx::CrownAwarded,
+        E::FocusAttack => Sfx::FocusAttack,
     }
 }

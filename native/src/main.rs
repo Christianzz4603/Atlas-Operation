@@ -1,6 +1,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 mod app;
+mod audio;
 mod camera;
 mod config;
 mod econ;
@@ -168,6 +169,8 @@ async fn main() {
 
     let fps_cap = cfg.fps_cap;
     let mut app = App::new(vec![w0, w1], display, body, logo.clone(), cfg);
+    app.audio.load_all().await;
+    app.audio.start_music();
     log("app ready");
     let mut first_frame = true;
 
